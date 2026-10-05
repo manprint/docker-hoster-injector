@@ -29,7 +29,25 @@ type Entry struct {
 	ContainerName string
 	// State is the container's Docker state at the time of the reconcile.
 	State string
+	// Side says where the address points: at the host, through a published
+	// port, or at the container itself. It decides which ports can be reached
+	// through this record, which is what the web UI turns into links.
+	Side AddressSide
+	// Ports are the container's exposed and published ports.
+	Ports []dockerclient.Port
 }
+
+// AddressSide tells the two kinds of address a container can be published
+// under apart.
+type AddressSide string
+
+const (
+	// SideHost is an address of the host (loopback or a bound interface), on
+	// which the container's published ports listen.
+	SideHost AddressSide = "host"
+	// SideContainer is the container's own address on one of its networks.
+	SideContainer AddressSide = "container"
+)
 
 // SkipReason explains why a container produced no records.
 type SkipReason string
@@ -223,10 +241,18 @@ func (r *Reconciler) Reconcile(containers []dockerclient.Container) Result {
 		if len(names) == 0 {
 			continue
 		}
+		hostSide := make(map[string]bool)
+		for _, a := range hostAddresses(c) {
+			hostSide[a] = true
+		}
 		for _, addr := range byAddress[c.ID] {
 			ip := net.ParseIP(addr)
 			if ip == nil {
 				continue
+			}
+			side := SideContainer
+			if hostSide[addr] {
+				side = SideHost
 			}
 			res.Entries = append(res.Entries, Entry{
 				Entry: hostsfile.Entry{
@@ -236,6 +262,8 @@ func (r *Reconciler) Reconcile(containers []dockerclient.Container) Result {
 				ContainerID:   c.ID,
 				ContainerName: c.Name,
 				State:         c.State,
+				Side:          side,
+				Ports:         c.PublishedPorts,
 			})
 		}
 	}

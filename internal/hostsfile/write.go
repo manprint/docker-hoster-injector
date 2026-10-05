@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/mint/docker-hoster-injector/internal/config"
 )
@@ -21,6 +22,16 @@ const DefaultPerm fs.FileMode = 0o644
 // DirPerm is used when the agent has to create the hosts file itself, which
 // happens in tests and in the "dir" mount mode on a fresh volume.
 const DirPerm fs.FileMode = 0o755
+
+// TempPrefix starts the name of the temporary file written in "dir" mode before
+// it is renamed over the hosts file. A process killed between creating it and
+// the rename leaves it behind, which is why CleanStale knows the prefix.
+const TempPrefix = ".hosts-docker-hoster-injector-"
+
+// staleTempAge is how old a leftover temporary file must be before it is
+// removed. A younger one may belong to a second agent that is writing right
+// now.
+const staleTempAge = time.Minute
 
 // ErrNotManaged is returned when the file is not under this agent's control.
 var ErrNotManaged = errors.New("hosts file does not contain a managed block")
@@ -166,7 +177,10 @@ func (w *Writer) Apply(entries []Entry) (changed bool, err error) {
 		f.HadBlock = false
 	}
 
-	if SameManagedBlock(f, entries) && !f.BlockTruncated {
+	// A block with nothing in it is not worth keeping: Render leaves it out, so
+	// a file that has one is not up to date when no entries are wanted.
+	emptyBlockLeft := f.HadBlock && len(GroupByAddr(entries)) == 0
+	if SameManagedBlock(f, entries) && !f.BlockTruncated && !emptyBlockLeft {
 		// Nothing to do. lastApplied already reflects the file.
 		return false, nil
 	}
@@ -186,10 +200,8 @@ func (w *Writer) Apply(entries []Entry) (changed bool, err error) {
 // mode.
 //
 // Both strategies end with the file fsynced before Apply reports success, so a
-// reported success survives a power cut. Neither ever truncates first: in
-// "file" mode the whole new content is written in a single write(2) over the
-// old content and only then trimmed, which means a crash can leave trailing
-// bytes from the previous version but never a hole or a zero-filled prefix.
+// reported success survives a power cut. See writeInPlace for what a crash can
+// leave behind in "file" mode and why.
 func (w *Writer) writeLocked(data []byte) error {
 	switch w.mode {
 	case config.MountModeDir:
@@ -205,12 +217,33 @@ func (w *Writer) writeLocked(data []byte) error {
 // This is fully atomic, but rename(2) fails with EBUSY when the target is
 // itself a bind mount, which is why it is only used in "dir" mode.
 func (w *Writer) writeAtomic(data []byte) error {
-	dir := filepath.Dir(w.path)
+	// A hosts file that is a symlink (to /run, say) must stay one: renaming over
+	// the link would replace it with a regular file. The target is written
+	// instead, next to where it really lives.
+	target := w.path
+	if resolved, err := filepath.EvalSymlinks(w.path); err == nil {
+		target = resolved
+	}
+
+	dir := filepath.Dir(target)
 	if err := os.MkdirAll(dir, DirPerm); err != nil {
 		return fmt.Errorf("create %s: %w", dir, err)
 	}
 
-	tmp, err := os.CreateTemp(dir, ".hosts-docker-hoster-injector-*")
+	// The replacement inherits the mode and owner of the file it replaces. A
+	// hosts file is not always 0644 root:root, and silently changing who can
+	// read or write it is a side effect nobody asked for.
+	perm := DefaultPerm
+	var uid, gid int
+	haveOwner := false
+	if info, err := os.Stat(target); err == nil {
+		perm = info.Mode().Perm()
+		if st, ok := info.Sys().(*syscall.Stat_t); ok {
+			uid, gid, haveOwner = int(st.Uid), int(st.Gid), true
+		}
+	}
+
+	tmp, err := os.CreateTemp(dir, TempPrefix+"*")
 	if err != nil {
 		return fmt.Errorf("create temp file in %s: %w", dir, err)
 	}
@@ -230,8 +263,16 @@ func (w *Writer) writeAtomic(data []byte) error {
 		return cause
 	}
 
-	if err := tmp.Chmod(DefaultPerm); err != nil {
+	if err := tmp.Chmod(perm); err != nil {
 		return cleanup(fmt.Errorf("chmod %s: %w", tmpName, err))
+	}
+	if haveOwner {
+		// Only a process that may change ownership can do it, and one that
+		// cannot (no CAP_CHOWN) is, by construction, already writing as the
+		// owner it was given. A refusal is therefore not a failure.
+		if err := tmp.Chown(uid, gid); err != nil && !errors.Is(err, fs.ErrPermission) {
+			return cleanup(fmt.Errorf("chown %s: %w", tmpName, err))
+		}
 	}
 	if _, err := tmp.Write(data); err != nil {
 		return cleanup(fmt.Errorf("write %s: %w", tmpName, err))
@@ -243,9 +284,9 @@ func (w *Writer) writeAtomic(data []byte) error {
 		_ = os.Remove(tmpName) // see cleanup above: the real error is the one above
 		return fmt.Errorf("close %s: %w", tmpName, err)
 	}
-	if err := os.Rename(tmpName, w.path); err != nil {
+	if err := os.Rename(tmpName, target); err != nil {
 		_ = os.Remove(tmpName) // see cleanup above: the real error is the one above
-		return fmt.Errorf("rename %s to %s: %w", tmpName, w.path, err)
+		return fmt.Errorf("rename %s to %s: %w", tmpName, target, err)
 	}
 
 	// Sync the directory so the rename itself survives a power cut.
@@ -267,35 +308,97 @@ func (w *Writer) writeAtomic(data []byte) error {
 // The flock is what makes this safe against a second instance of the agent;
 // the single write is what keeps the visible window of incoherence down to
 // one syscall.
-func (w *Writer) writeInPlace(data []byte) error {
+func (w *Writer) writeInPlace(data []byte) (err error) {
 	f, err := os.OpenFile(w.path, os.O_RDWR|os.O_CREATE, DefaultPerm)
 	if err != nil {
 		return fmt.Errorf("open the hosts file for writing: %w", err)
 	}
 	defer func() {
-		// Releasing the lock and closing are both best effort at this point:
-		// the kernel drops the flock when the descriptor is closed, so a
-		// failure of the explicit unlock cannot leave the lock held.
+		// The explicit unlock is best effort: the kernel drops the flock when
+		// the descriptor is closed, so a failure here cannot leave it held.
+		// A failed close is reported, unless an earlier error is already.
 		_ = unlock(f)
-		_ = f.Close()
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("close the hosts file: %w", cerr)
+		}
 	}()
 
 	if err := flockExclusive(f); err != nil {
 		return fmt.Errorf("lock %s: %w", w.path, err)
 	}
 
-	// Seek back to the start so a retry over a longer file is correct.
-	if _, err := f.WriteAt(data, 0); err != nil {
-		return fmt.Errorf("write %s: %w", w.path, err)
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat the hosts file: %w", err)
 	}
-	// Only now remove what the previous, longer version left behind.
-	if err := f.Truncate(int64(len(data))); err != nil {
-		return fmt.Errorf("truncate %s: %w", w.path, err)
+
+	// When the new content is shorter, the file is cut to its final length
+	// first and the content is written over it afterwards.
+	//
+	// The order matters for what a crash can leave behind. Cutting afterwards
+	// would leave, for the instant between the two calls, the new content
+	// followed by the tail of the old one: complete lines after the closing
+	// marker that nothing could ever tell apart from the operator's own, and
+	// that would then be kept for good. Cutting first leaves only a prefix of
+	// the old file: the operator's lines are untouched and the block is
+	// missing its end marker, which is exactly the damage recovery recognises
+	// and rebuilds. A longer or equal content needs no cut at all.
+	if int64(len(data)) < info.Size() {
+		if err := f.Truncate(int64(len(data))); err != nil {
+			return fmt.Errorf("truncate the hosts file: %w", err)
+		}
+	}
+	if _, err := f.WriteAt(data, 0); err != nil {
+		return fmt.Errorf("write the hosts file: %w", err)
 	}
 	if err := f.Sync(); err != nil {
-		return fmt.Errorf("sync %s: %w", w.path, err)
+		return fmt.Errorf("sync the hosts file: %w", err)
 	}
 	return nil
+}
+
+// Clear removes the managed block and leaves everything else as it was.
+//
+// It is what the agent does when it stops: records that nothing keeps up to
+// date would sooner or later point at an address that has moved to another
+// container. It is idempotent, and a file without a block, or no file at all,
+// is not touched.
+func (w *Writer) Clear() (changed bool, err error) {
+	return w.Apply(nil)
+}
+
+// CleanStale removes temporary files left in the hosts file's directory by a
+// writer that was killed between creating one and renaming it. Only "dir" mode
+// creates them. It returns how many it removed.
+func (w *Writer) CleanStale() (removed int, err error) {
+	if w.mode != config.MountModeDir {
+		return 0, nil
+	}
+	dir := filepath.Dir(w.path)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("list %s: %w", dir, err)
+	}
+
+	var errs []error
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), TempPrefix) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || time.Since(info.ModTime()) < staleTempAge {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, err)
+			continue
+		}
+		removed++
+	}
+	return removed, errors.Join(errs...)
 }
 
 // Repair restores the last known good content when the file on disk shows
@@ -440,7 +543,7 @@ func isHeaderLine(raw string) bool {
 // synced, but without this the directory entry itself may be lost on a power
 // cut, which would resurrect the previous version of the file.
 func syncDir(dir string) error {
-	d, err := os.Open(dir)
+	d, err := os.Open(dir) //nolint:gosec // G304: dir is the directory of the configured hosts file, not user input
 	if err != nil {
 		return fmt.Errorf("open %s: %w", dir, err)
 	}

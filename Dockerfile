@@ -61,8 +61,14 @@ ENV DNS_SUFFIX=docker.local \
 
 EXPOSE 8080
 
+# The image has no shell or curl, so the binary probes itself. A degraded agent
+# (the last write failed) answers 503 and is reported unhealthy.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["/docker-hoster-injector", "healthcheck"]
+
 # SIGTERM is what "docker stop" sends, and the agent uses it for a graceful
-# shutdown that flushes the pending hosts file update.
+# shutdown: it removes its records from the hosts file before exiting. It gives
+# up after 8 seconds, inside Docker's default 10 second grace period.
 STOPSIGNAL SIGTERM
 
 ENTRYPOINT ["/docker-hoster-injector"]

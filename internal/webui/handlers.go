@@ -8,7 +8,7 @@ import (
 )
 
 // handleIndex serves the monitoring page.
-func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
 	page, err := renderIndex(s.cfg, s.current())
 	if err != nil {
 		s.log.Error("render the page", "error", err)
@@ -17,7 +17,9 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write([]byte(page))
+	if _, err := w.Write([]byte(page)); err != nil {
+		s.clientGone("index", err)
+	}
 }
 
 // handleEntries serves the JSON read model.
@@ -25,12 +27,12 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 // This is also the fallback for browsers where the event stream does not work,
 // so it must be complete on its own.
 func (s *Server) handleEntries(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, s.current())
+	s.writeJSON(w, s.current())
 }
 
 // handleConfig serves the static configuration of the deployment.
 func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, map[string]string{
+	s.writeJSON(w, map[string]string{
 		"dns_suffix":  s.cfg.DNSSuffix,
 		"hosts_file":  s.cfg.HostsFile,
 		"target_mode": s.cfg.TargetMode,
@@ -71,7 +73,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		s.clientGone("healthz", err)
+	}
 }
 
 // handleEvents streams updates over Server-Sent Events.
@@ -142,12 +146,21 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-func writeJSON(w http.ResponseWriter, v any) {
+func (s *Server) writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	_ = enc.Encode(v)
+	if err := enc.Encode(v); err != nil {
+		s.clientGone("json", err)
+	}
+}
+
+// clientGone records a response that could not be written. Once the status is
+// sent there is nothing to change for the client, and the usual cause is the
+// client having closed the connection, so it is a debug line and not an error.
+func (s *Server) clientGone(what string, err error) {
+	s.log.Debug("could not write the response", "what", what, "error", err)
 }
 
 func writeEvent(w http.ResponseWriter, name string, v any) error {

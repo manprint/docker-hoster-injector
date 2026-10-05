@@ -1,7 +1,7 @@
 package hostsfile
 
 import (
-	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"net"
@@ -82,16 +82,26 @@ type File struct {
 // the user's file because of one odd line would be a far worse outcome than
 // carrying the line along.
 func Parse(r io.Reader) (*File, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("read hosts file: %w", err)
+	}
+
 	f := &File{}
-	sc := bufio.NewScanner(r)
-
-	// A hosts file has no length limit, but a stray multi-megabyte line must
-	// not abort the parse either.
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-
 	inBlock := false
-	for sc.Scan() {
-		raw := sc.Text()
+
+	// Lines are split on '\n' only. A '\r' stays in the line, so that a file
+	// with CRLF endings is written back with CRLF endings and the operator's
+	// bytes survive a rewrite, which a line scanner that strips it would not
+	// allow. There is no maximum line length either: a stray multi-megabyte
+	// line must not abort the parse and cost the operator their file.
+	for len(data) > 0 {
+		var raw string
+		if i := bytes.IndexByte(data, '\n'); i >= 0 {
+			raw, data = string(data[:i]), data[i+1:]
+		} else {
+			raw, data = string(data), nil
+		}
 		trimmed := strings.TrimSpace(raw)
 
 		switch {
@@ -119,9 +129,7 @@ func Parse(r io.Reader) (*File, error) {
 
 		f.Lines = append(f.Lines, newLine(raw))
 	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("read hosts file: %w", err)
-	}
+
 	if inBlock {
 		f.BlockTruncated = true
 	} else {

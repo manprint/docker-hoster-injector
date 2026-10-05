@@ -720,3 +720,38 @@ func TestBothModeListsTheHostSideAddressFirst(t *testing.T) {
 		t.Errorf("second address = %s, want 10.0.0.5", got)
 	}
 }
+
+// The side of an address tells the web UI which ports it can link to, so it
+// has to follow the address and not the order they are listed in.
+func TestEntriesKnowWhichSideTheirAddressIsOn(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{DNSSuffix: "docker.local", TargetMode: config.TargetModeBoth}
+	ports := []dockerclient.Port{
+		{HostPort: 8080, ContainerPort: 80, Protocol: "tcp"},
+		{ContainerPort: 9000, Protocol: "tcp"},
+	}
+	c := dockerclient.Container{
+		ID: "a1", Name: "nginx", State: "running", NetworkMode: "mynet",
+		Created:        time.Unix(1, 0),
+		Networks:       []dockerclient.Network{{Name: "mynet", IPv4: "10.0.0.5"}},
+		PublishedPorts: ports,
+	}
+
+	res := New(cfg).Reconcile([]dockerclient.Container{c})
+	if len(res.Entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(res.Entries))
+	}
+	for _, e := range res.Entries {
+		want := SideContainer
+		if e.IP.String() == "127.0.0.1" {
+			want = SideHost
+		}
+		if e.Side != want {
+			t.Errorf("%s: side = %q, want %q", e.IP, e.Side, want)
+		}
+		if len(e.Ports) != len(ports) {
+			t.Errorf("%s: carries %d ports, want %d", e.IP, len(e.Ports), len(ports))
+		}
+	}
+}

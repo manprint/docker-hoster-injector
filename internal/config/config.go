@@ -91,7 +91,9 @@ const (
 type LogFormat string
 
 const (
+	// LogFormatJSON writes one JSON object per line, for log collectors.
 	LogFormatJSON LogFormat = "json"
+	// LogFormatText writes key=value lines, for a person reading a terminal.
 	LogFormatText LogFormat = "text"
 )
 

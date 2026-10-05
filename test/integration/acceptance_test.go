@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -349,14 +350,13 @@ func TestWebUIPageIsSelfContained(t *testing.T) {
 		t.Error("the stylesheet is not inlined, so the page would be unstyled offline")
 	}
 	// No external resources: this service is often on an isolated network.
-	for _, marker := range []string{"http://", "https://", "//cdn"} {
-		if idx := strings.Index(body, marker); idx >= 0 {
-			// Allow the harmless case of a marker inside the API path comments.
-			ctx := body[max(0, idx-40):min(len(body), idx+40)]
-			if !strings.Contains(ctx, "127.0.0.1") && !strings.Contains(ctx, "api/") {
-				t.Errorf("the page references an external resource: %q", ctx)
-			}
-		}
+	// What counts is what the browser would fetch, that is attributes and CSS
+	// references. A URL inside the embedded data (the links to the containers)
+	// is text the page shows, not something it loads.
+	external := regexp.MustCompile(`(?i)(?:src|href|action|poster|data)\s*=\s*["']?(?:https?:)?//|url\(\s*["']?(?:https?:)?//|@import|<link\b`)
+	if loc := external.FindStringIndex(body); loc != nil {
+		t.Errorf("the page references an external resource: %q",
+			body[max(0, loc[0]-40):min(len(body), loc[1]+40)])
 	}
 }
 

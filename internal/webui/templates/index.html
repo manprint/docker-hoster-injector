@@ -34,7 +34,7 @@
   <table id="published">
     <caption>Published records</caption>
     <thead>
-      <tr><th>Container</th><th>State</th><th>Address</th><th>Names</th></tr>
+      <tr><th>Container</th><th>State</th><th>Address</th><th>Names</th><th>Open</th></tr>
     </thead>
     <tbody></tbody>
   </table>
@@ -66,17 +66,18 @@ function render(snap) {
   const filter = document.getElementById('filter').value.trim().toLowerCase();
   const match = (s) => !filter || s.toLowerCase().includes(filter);
 
-  const published = snap.records.filter(r => match(r.container + ' ' + r.address + ' ' + r.names.join(' ')));
+  const published = snap.records.filter(r => match(r.container + ' ' + r.address + ' ' + r.names.join(' ') + ' ' + r.links.map(l => l.label).join(' ')));
   const skipped = snap.skipped.filter(r => match(r.container + ' ' + r.reason));
 
   const pbody = document.querySelector('#published tbody');
   pbody.replaceChildren(...published.map(r => {
     const tr = document.createElement('tr');
     tr.dataset.key = r.container_id + '|' + r.address;
-    cell(tr, r.container);
-    cell(tr, r.state, 'state-' + r.state);
-    cell(tr, r.address, 'addr');
+    cell(tr, r.container, '', 'Container');
+    cell(tr, r.state, 'state-' + r.state, 'State');
+    cell(tr, r.address, 'addr', 'Address');
     const td = document.createElement('td');
+    td.dataset.label = 'Names';
     for (const n of r.names) {
       const code = document.createElement('code');
       code.className = 'name';
@@ -84,15 +85,16 @@ function render(snap) {
       td.appendChild(code);
     }
     tr.appendChild(td);
+    tr.appendChild(links(r.links));
     return tr;
   }));
 
   const sbody = document.querySelector('#skipped tbody');
   sbody.replaceChildren(...skipped.map(r => {
     const tr = document.createElement('tr');
-    cell(tr, r.container);
-    cell(tr, r.state, 'state-' + r.state);
-    cell(tr, r.reason, 'reason');
+    cell(tr, r.container, '', 'Container');
+    cell(tr, r.state, 'state-' + r.state, 'State');
+    cell(tr, r.reason, 'reason', 'Reason');
     return tr;
   }));
 
@@ -106,9 +108,41 @@ function render(snap) {
   highlightChanged();
 }
 
-function cell(tr, text, cls) {
+// Only http and https are ever turned into links, whatever the snapshot says:
+// the URL is written to an href, and any other scheme (javascript:, data:)
+// would run in the context of this page.
+const SAFE_URL = /^https?:\/\//;
+
+function links(list) {
+  const td = document.createElement('td');
+  td.className = 'links';
+  td.dataset.label = 'Open';
+  for (const l of list || []) {
+    let el;
+    if (l.url && SAFE_URL.test(l.url)) {
+      el = document.createElement('a');
+      el.href = l.url;
+      el.target = '_blank';
+      el.rel = 'noopener noreferrer';
+      el.title = 'open ' + l.url;
+    } else {
+      el = document.createElement('span');
+      el.className = 'noweb';
+      el.title = l.protocol + ' port, not opened as a web page';
+    }
+    el.classList.add('link');
+    el.textContent = l.label;
+    td.appendChild(el);
+  }
+  return td;
+}
+
+// label is the column name, shown above the value on a narrow screen where the
+// table is laid out as cards.
+function cell(tr, text, cls, label) {
   const td = document.createElement('td');
   if (cls) td.className = cls;
+  if (label) td.dataset.label = label;
   td.textContent = text === undefined || text === null ? '' : String(text);
   tr.appendChild(td);
   return td;

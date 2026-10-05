@@ -51,6 +51,24 @@ type Record struct {
 	ContainerID string `json:"container_id"`
 	// State is the Docker state at the time of the reconcile.
 	State string `json:"state"`
+	// Side is "host" when the address is the host's, reached through a
+	// published port, and "container" when it is the container's own.
+	Side string `json:"side"`
+	// Links are the ports reachable through this address, ready to open.
+	Links []Link `json:"links"`
+}
+
+// Link is one port of a container, reachable through the address of a record.
+type Link struct {
+	// Label is what is shown: host:port, as it would be typed.
+	Label string `json:"label"`
+	// URL is the address to open. It is empty for a port that is not known to
+	// speak HTTP (a database, a UDP service), which is then shown but not
+	// offered as a link.
+	URL string `json:"url"`
+	// Port and Protocol identify the port; Port is the one in the URL.
+	Port     int    `json:"port"`
+	Protocol string `json:"protocol"`
 }
 
 // SkippedContainer explains why a container has no record.
@@ -232,7 +250,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write([]byte(b.String()))
+	if _, err := w.Write([]byte(b.String())); err != nil {
+		s.clientGone("metrics", err)
+	}
 }
 
 // Listen binds the address and returns the listener, so that a port that is

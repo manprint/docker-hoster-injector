@@ -28,12 +28,9 @@ func Render(f *File, managed []Entry) []byte {
 		buf.WriteByte('\n')
 	}
 
-	// Avoid leaving a blank gap when the user part already ends with one.
-	body := buf.Bytes()
-	if len(body) > 0 && body[len(body)-1] == '\n' && lastLineIsBlank(f.Lines) {
-		buf.Truncate(buf.Len() - 1)
-	}
-
+	// The user part is written exactly as it was read, and nothing is added to
+	// it or taken away. That is what makes adding the block and later removing
+	// it a round trip: the file returns to the operator's own bytes.
 	if len(managed) > 0 {
 		buf.WriteString(BeginMarker)
 		buf.WriteByte('\n')
@@ -56,13 +53,6 @@ func Render(f *File, managed []Entry) []byte {
 	}
 
 	return buf.Bytes()
-}
-
-func lastLineIsBlank(lines []Line) bool {
-	if len(lines) == 0 {
-		return false
-	}
-	return lines[len(lines)-1].Kind == LineBlank
 }
 
 // RenderBlock renders just the managed block, for inspection in the web UI.

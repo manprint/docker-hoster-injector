@@ -146,6 +146,13 @@ func TestMain(m *testing.M) {
 	code = m.Run()
 
 	agent.stop()
+	// A graceful exit hands the real hosts file back to the operator: nothing
+	// of the agent may remain in it, and every other byte must be the seed.
+	if got, err := os.ReadFile(hostsPath); err != nil || string(got) != seedHosts {
+		fmt.Fprintf(os.Stderr, "FAIL: %s after a graceful stop is not the operator's file (err=%v):\n%s\n",
+			hostsPath, err, got)
+		code = 1
+	}
 	teardown()
 	os.Exit(code)
 }
@@ -252,9 +259,9 @@ func userSection(t *testing.T) string {
 		}
 		out = append(out, line)
 	}
-	// The renderer appends the block after the user content, and removes one
-	// trailing blank line, so the user section must round-trip to the seed.
-	return strings.TrimRight(strings.Join(out, "\n"), "\n") + "\n"
+	// The renderer writes the operator's lines exactly as read and appends the
+	// block after them, so what is left must be the seed byte for byte.
+	return strings.Join(out, "\n")
 }
 
 // record is one parsed line of the managed block.

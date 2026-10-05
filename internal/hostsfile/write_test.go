@@ -506,7 +506,7 @@ func TestWriterSerialisesConcurrentWriters(t *testing.T) {
 
 			for i := 0; i < writers; i++ {
 				wg.Add(1)
-				go func(i int) {
+				go func() {
 					defer wg.Done()
 					w, err := NewWriter(path, mode)
 					if err != nil {
@@ -523,7 +523,7 @@ func TestWriterSerialisesConcurrentWriters(t *testing.T) {
 							return
 						}
 					}
-				}(i)
+				}()
 			}
 			wg.Wait()
 
@@ -564,7 +564,7 @@ func TestWriterIsSafeForConcurrentUseOnOneInstance(t *testing.T) {
 			var wg sync.WaitGroup
 			for i := 0; i < 16; i++ {
 				wg.Add(1)
-				go func(i int) {
+				go func() {
 					defer wg.Done()
 					for j := 0; j < 10; j++ {
 						if _, err := w.Apply(entriesFor("x.docker.local")); err != nil {
@@ -572,7 +572,7 @@ func TestWriterIsSafeForConcurrentUseOnOneInstance(t *testing.T) {
 							return
 						}
 					}
-				}(i)
+				}()
 			}
 			wg.Wait()
 

@@ -102,7 +102,10 @@ caption {
 }
 
 th, td {
-  overflow-wrap: anywhere;
+  /* "break-word", not "anywhere": the latter lets a column shrink below its
+     longest word, so a state or an address ends up broken in the middle on a
+     normal screen. Names and links, which can be long, use "anywhere". */
+  overflow-wrap: break-word;
   padding: .4rem .6rem;
   border-bottom: 1px solid var(--line);
   text-align: left;
@@ -153,4 +156,43 @@ footer {
   border-top: 1px solid var(--line);
   color: var(--muted);
   font-size: .8rem;
+}
+
+/* Access links: one chip per reachable port. */
+td.links { white-space: normal; }
+.link {
+  display: inline-block;
+  margin: 0 .35rem .25rem 0;
+  padding: .1rem .5rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font: .85em ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+  text-decoration: none;
+}
+a.link { color: var(--accent); }
+a.link:hover, a.link:focus-visible { text-decoration: underline; }
+span.noweb { opacity: .6; cursor: default; }
+
+/* Narrow screens: a row becomes a card, with the column name above each value.
+   A table of five columns cannot be read at 390px however it wraps. */
+@media (max-width: 640px) {
+  table, tbody, caption { display: block; }
+  thead { position: absolute; left: -9999px; }
+  tr {
+    display: block;
+    margin: 0 0 .6rem;
+    padding: .3rem 0;
+    border: 1px solid var(--line);
+    border-radius: .5rem;
+  }
+  td { display: block; padding: .2rem .7rem; border: 0; }
+  td::before {
+    content: attr(data-label);
+    display: block;
+    color: var(--muted);
+    font-size: .7rem;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+  }
 }

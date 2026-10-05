@@ -9,6 +9,11 @@ services:
     container_name: docker-hoster-injector
     restart: unless-stopped
 
+    # On "docker stop" the agent removes its records from the hosts file and
+    # gives up after 8 seconds, so Docker's default 10 second grace period is
+    # enough. Do not set it lower than that.
+    stop_grace_period: 10s
+
     environment:
       # The base domain. A container named "nginx" becomes nginx.docker.local.
       DNS_SUFFIX: docker.local

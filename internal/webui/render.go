@@ -50,10 +50,15 @@ func renderIndex(cfg Config, snap Snapshot) (string, error) {
 	}
 
 	data := indexData{
-		Config:       cfg,
-		CSS:          template.CSS(styleCSS),
-		Snapshot:     snap,
-		SnapshotJSON: template.JS(raw),
+		Config: cfg,
+		// The stylesheet is compiled into the binary, so it is not data an
+		// attacker can influence.
+		CSS:      template.CSS(styleCSS), //nolint:gosec // G203: embedded static asset
+		Snapshot: snap,
+		// encoding/json escapes <, > and & as \u003c, \u003e and \u0026, so the
+		// text cannot close the script element it is placed in; see
+		// TestSnapshotCannotBreakOutOfTheScriptElement.
+		SnapshotJSON: template.JS(raw), //nolint:gosec // G203: JSON from json.Marshal, HTML-escaped
 	}
 
 	var buf bytes.Buffer

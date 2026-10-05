@@ -1,3 +1,5 @@
+// Benchmarks for the hosts file: parsing, rendering and the steady-state
+// comparison that decides whether a write is needed at all.
 package hostsfile
 
 import (

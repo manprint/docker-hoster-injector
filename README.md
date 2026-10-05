@@ -13,9 +13,14 @@ con o senza `systemd`, perché non dipende dal resolver: la risoluzione passa
 per `nss-files`, presente ovunque.
 
 > **Stato** — Funzionante e verificato end to end. La suite di accettazione
-> avvia una quindicina di container reali in tutte le configurazioni
-> significanti, verifica la risoluzione dal vivo e il recovery dopo `kill -9`,
-> poi ripristina `/etc/hosts`. `sudo make test-integration` per eseguirla.
+> avvia una ventina di container reali in tutte le configurazioni
+> significative, verifica la risoluzione dal vivo, ogni modo di uscita
+> (`SIGTERM`, `SIGINT`, `SIGHUP`, `docker stop`, `kill -9`) e la web UI in un
+> browser vero (Playwright), poi ripristina `/etc/hosts`.
+> `sudo make test-integration` e `make test-e2e` per eseguirle.
+
+**Alla chiusura l'agente toglie i suoi record dal file**: dopo un arresto
+ordinato `/etc/hosts` torna identico, byte per byte, a com'era prima.
 
 ---
 
@@ -29,6 +34,8 @@ per `nss-files`, presente ovunque.
 - [Riferimento dei nomi pubblicati](#riferimento-dei-nomi-pubblicati)
 - [Sicurezza](#sicurezza)
 - [Durata e crash safety](#durata-e-crash-safety)
+- [Arresto e uscite forzate](#arresto-e-uscite-forzate)
+- [Comandi](#comandi)
 - [Sviluppo](#sviluppo)
 - [Test](#test)
 - [Architettura](#architettura)
@@ -88,8 +95,33 @@ pubblicati, che si aggiorna da sola.
 | `GET /api/entries` | Lo stesso dato in JSON, per script e per il fallback |
 | `GET /api/config` | La configurazione della distribuzione |
 | `GET /api/events` | Stream SSE: ogni messaggio è uno snapshot completo. Assente con `WEB_EVENTS=false`: la pagina interroga allora `/api/entries` ogni 5 s |
-| `GET /healthz` | `503` se l'ultima applicazione è fallita |
+| `GET /healthz` | `503` se l'ultima applicazione è fallita; è anche ciò che interroga l'`HEALTHCHECK` dell'immagine |
 | `GET /metrics` | Contatori in formato Prometheus |
+
+### I link di accesso
+
+L'ultima colonna, **Open**, elenca le porte raggiungibili attraverso quell'indirizzo,
+come link cliccabili che si aprono in una nuova scheda:
+
+| Riga | Link | Perché |
+|---|---|---|
+| Indirizzo dell'host (`127.0.0.1`, o l'interfaccia scelta con `-p IP:…`) | `http://<nome>:<porta pubblicata>/` | È lo scopo del nome: `nginx.docker.local:8080` funziona come `localhost:8080` |
+| Indirizzo del container | `http://<indirizzo>:<porta del container>/` | Si usa l'**indirizzo** e non il nome, perché in modalità `both` il nome risolve prima sull'host, e un servizio dell'host sulla stessa porta risponderebbe al posto del container. Con `TARGET_MODE=container-ip` il nome risolve solo sul container e si usa il nome |
+
+Regole:
+
+- Le porte `443`, `4443`, `8443`, `9443` sono `https`; le altre `http`.
+- Le porte di protocolli noti come non web (SSH, database, broker, …) e le porte
+  UDP **si vedono ma non sono link**. Il protocollo si giudica dalla porta
+  *interna* del servizio: un Postgres pubblicato su `49153` resta un database.
+- Docker conosce solo le porte **dichiarate**: pubblicate (`-p`) o esposte
+  (`EXPOSE`, `--expose`). Un server che ascolta su una porta mai dichiarata non
+  compare, e non c'è modo di scoprirlo da fuori.
+- I link si compongono nel server e il browser li accetta solo se iniziano per
+  `http://` o `https://`: un valore diverso (`javascript:`, `data:`) viene
+  mostrato come testo e mai come link. Hanno `rel="noopener noreferrer"`.
+- Un container in pausa non ha record: ha un indirizzo ma non risponde, e un
+  nome che risolve e poi si blocca è peggio di un nome che non risolve.
 
 Ogni messaggio SSE è uno **snapshot completo**, non un diff: il payload è
 piccolo e un client che si riconnette in qualsiasi momento è subito corretto,
@@ -295,16 +327,28 @@ scrittura innocua anche sotto crash.
 
 1. **Il blocco gestito sta in fondo al file.** Una scrittura interrotta può
    perdere al massimo i record dei container, mai le entry dell'utente.
-2. **Non si tronca mai prima di scrivere.** Nella modalità `file` il contenuto
-   completo viene scritto sopra il vecchio e solo dopo ritagliato. Un crash può
-   lasciare byte del testo precedente in coda, mai un buco o un file azzerato.
+2. **L'ordine di scrittura è scelto per il crash.** Il contenuto è sempre scritto
+   in un'unica `write(2)` sopra il vecchio. Se il nuovo è più corto, il file è
+   accorciato **prima**: un crash lascia al più un blocco senza marcatore finale,
+   che il recovery riconosce e ricostruisce. Accorciare dopo lascerebbe righe
+   complete del vecchio contenuto dopo `END`, indistinguibili da quelle
+   dell'utente e quindi conservate per sempre.
 3. **Il file viene `fsync`-ato prima di riportare successo**, e in modalità
    `dir` anche la directory, così il `rename` è durevole.
 4. **Ogni scrittura è idempotente**: se il blocco non cambia, il file non viene
    toccato e il suo `mtime` non cambia. Uno stato stazionario non costa I/O.
 5. **`flock` consultivo** serializza più istanze dell'agente sullo stesso file.
 6. **Le entry dell'utente sono preservate byte per byte**, incluse le righe
-   malformate, che vengono conservate invece di essere "pulite".
+   malformate, le righe vuote finali, il CRLF, i byte non UTF-8 e le righe lunghe
+   quanto si vuole (nessun limite). Aggiungere il blocco e poi toglierlo è un
+   **round trip esatto**: verificato anche con fuzzing. L'unica differenza
+   ammessa è un `\n` finale, se il file non lo aveva.
+7. **Permessi, proprietario e symlink del file sono preservati** nella modalità
+   `dir`. Un `/etc/hosts` che è un link simbolico resta un link e si scrive il
+   suo bersaglio.
+8. **Nessun file temporaneo resta in giro**: quelli lasciati da un processo
+   ucciso a metà (`.hosts-docker-hoster-injector-*`, più vecchi di un minuto)
+   sono rimossi al successivo avvio.
 
 ### Cosa fa il recovery
 
@@ -321,10 +365,6 @@ docker restart docker-hoster-injector
 
 ### Comportamenti da conoscere
 
-- **All'arresto il blocco resta nel file.** L'agente non lo rimuove con `SIGTERM`:
-  se un container sparisce mentre l'agente è fermo, il suo record resta finché
-  l'agente non riparte. Per toglierlo a mano basta cancellare le righe tra
-  `BEGIN docker-hoster-injector` e `END docker-hoster-injector`.
 - **Mount del singolo file (`file`) e inode.** Un bind mount segue l'inode, non il
   percorso: se qualcosa sull'host *sostituisce* `/etc/hosts` con un rename
   (alcuni editor, `sed -i`, certi tool di provisioning), il container continua a
@@ -348,6 +388,49 @@ sono recuperabili, quelli esterni no.
 
 ---
 
+## Arresto e uscite forzate
+
+Un record che nessuno tiene più aggiornato prima o poi punta all'indirizzo di un
+altro container. Per questo il blocco **non sopravvive** al processo che lo
+mantiene.
+
+| Come finisce l'agente | Cosa succede al file |
+|---|---|
+| `SIGTERM` (`docker stop`, systemd), `SIGINT` (Ctrl-C), `SIGHUP` | Il blocco viene **rimosso**; il file torna quello dell'operatore. Exit code 0 |
+| Segnali ripetuti durante la pulizia | Assorbiti: la pulizia non viene interrotta |
+| Errore fatale all'avvio (es. Docker non raggiungibile) | Il file viene aperto *prima* di contattare Docker, quindi un blocco rimasto da un'esecuzione precedente viene rimosso comunque |
+| `panic` in qualunque goroutine | Lo stack viene registrato, l'agente si ferma e rimuove il blocco; exit code 1 |
+| Arresto che non finisce | Dopo 8 s il processo esce da solo (sotto i 10 s di grazia di Docker), invece di ricevere un `SIGKILL` a metà scrittura |
+| `SIGKILL`, OOM killer, perdita di alimentazione | **Nessun codice può girare**: il blocco resta. Il successivo avvio lo ripara e lo riallinea (nessun duplicato, nessuna riga spuria), oppure si usa `docker-hoster-injector clean` |
+
+La rimozione è **idempotente**: farla due volte, o su un file senza blocco o
+inesistente, non cambia nulla (nemmeno l'`mtime`) e non crea il file.
+
+Se qualcosa riscrive il file mentre l'agente è fermo, l'agente non ne sa nulla:
+alla ripartenza il file viene riletto e il blocco ricostruito sopra ciò che c'è.
+
+## Comandi
+
+```text
+docker-hoster-injector [run]        mantiene il file (predefinito)
+docker-hoster-injector clean        toglie il blocco e i temporanei lasciati da un'esecuzione uccisa
+docker-hoster-injector healthcheck  esce con 0 se l'agente in esecuzione risponde 200 su /healthz
+docker-hoster-injector version
+```
+
+`clean` non richiede né Docker né un agente in esecuzione, e si può lanciare più
+volte. Con l'immagine:
+
+```bash
+docker run --rm -v /etc/hosts:/etc/hosts docker-hoster-injector:dev clean
+```
+
+L'immagine definisce un `HEALTHCHECK` che usa `healthcheck`: non ha shell né curl,
+quindi il binario è la propria sonda. Un agente la cui ultima scrittura è fallita
+risponde `503` ed è segnalato `unhealthy`.
+
+---
+
 ## Sviluppo
 
 ```bash
@@ -356,10 +439,16 @@ make build         # binario in ./bin
 make test          # test unitari
 make test-race     # test unitari con race detector
 make cover         # copertura
-make lint          # go vet + staticcheck
-make test-integration
+make lint          # go vet + golangci-lint (staticcheck, errcheck, govet, revive, gosec)
+make fuzz          # fuzzing del round trip del file hosts (30 s)
+sudo make test-integration
+make test-e2e      # test del browser sulla web UI (Playwright)
 make image
 ```
+
+Le regole di stile e di robustezza che il progetto si impone sono in
+[`BestPractice.md`](BestPractice.md); il set di linter che le verifica è in
+`.golangci.yml`. Le direttive `//nolint` portano sempre la motivazione.
 
 Toolchain: il progetto dichiara `go 1.25` come minimo ed è sviluppato e testato con
 **Go 1.27** (riga `toolchain` di `go.mod`, immagine `golang:1.27-alpine`).
@@ -371,12 +460,14 @@ Toolchain: il progetto dichiara `go 1.25` come minimo ed è sviluppato e testato
 ```bash
 make test              # unitari, veloci
 make test-race         # obbligatorio: la concorrenza è il cuore del progetto
-make test-integration  # crash, concorrenza e naming, dietro build tag
+make test-integration  # crash, uscite, immagine, web UI, estate di container (build tag, root)
+make test-e2e          # web UI in un browser vero (Playwright + Chrome di sistema)
+make fuzz              # round trip del file hosts
 ```
 
-Copertura attuale: **~81%** delle dichiarazioni (`version` 100%, `reconcile`
-95%, `webui` 93%, `config` 93%, `naming` 93%, `watcher` 92%, `apply` 91%,
-`hostsfile` 86%, `dockerclient` 60%). `dockerclient` è più bassa perché quasi
+Copertura attuale dei test unitari: **~85%** delle dichiarazioni (`version` 100%,
+`reconcile` 95%, `naming` 93%, `config` 93%, `webui` 93%, `watcher` 92%, `apply`
+91%, `hostsfile` 86%, `agent` 78%, `dockerclient` 60%). `dockerclient` è più bassa perché quasi
 tutto quel package parla con il daemon; la parte più delicata, lo stream di
 eventi, è però coperta da un finto daemon HTTP nei test unitari: un test di
 accettazione non basta a vedere uno stream che si chiude senza avvisare.
@@ -389,9 +480,15 @@ accettazione non basta a vedere uno stream che si chiude senza avvisare.
 | Naming | Corpus di nomi reali (Compose v1/v2, Swarm, k8s, non-ASCII, 300 caratteri, metacaratteri), idempotenza, stabilità, collisioni |
 | Parsing hosts | Classificazione righe, byte-per-byte, CRLF, righe malformate, blocchi orfani |
 | Scrittura | Idempotenza, preserva entry utente, entrambe le modalità, concorrenza, assenza di file temporanei, `flock` |
+| **Round trip** | Aggiungi + togli = byte originali (CRLF, righe vuote finali, senza `\n` finale, byte non UTF-8, riga da 6 MB), con **fuzzing**; nessun residuo dopo `END`; symlink e permessi preservati; pulizia dei temporanei |
+| **Ciclo di vita** | `internal/agent` con un Docker finto: arresto rimuove il blocco, riavvio dopo kill converge, panic, errore all'avvio, `clean` idempotente |
+| Link della web UI | Porta pubblicata, porta del container, IPv6, container-ip, porte non web e UDP, nome preferito, escape di `</script>` |
 | **Crash** | `SIGKILL` reale durante le scritture, 15 round per modalità, recovery da ogni forma di danno |
 | Iniezione | Un nome con `\n` **non può** iniettare record nel file dell'host |
-| Accettazione | 15 container reali, dalla creazione al `kill -9`, con verifica HTTP reale |
+| Accettazione | ~20 container reali, dalla creazione al `kill -9`, con verifica HTTP reale |
+| **Uscite** | Processo vero: `SIGTERM`/`SIGINT`/`SIGHUP` in entrambe le modalità, segnali ripetuti, `kill -9` + riavvio, `clean`, Docker irraggiungibile, permessi del file |
+| **Immagine** | `docker stop` restituisce il file all'operatore (bind mount di file e di directory), `docker kill` + `clean`/riavvio, `HEALTHCHECK` healthy |
+| **Browser** | Playwright: tabella = API = file hosts, link cliccabili e funzionanti, filtro, aggiornamenti dal vivo, polling, dati ostili, schermo stretto, tema scuro, tastiera, riconnessione |
 
 ### I test di accettazione
 
@@ -418,6 +515,10 @@ L'estate comprende quindici container che coprono ogni regola:
 | `dhi-nonet --network none` | **Deve essere escluso** |
 | `localhost` | **Nome riservato: deve essere escluso** |
 
+Altri container, creati dai singoli test, coprono UDP, una porta di database, una
+porta TLS, un container su due reti, un container in pausa e due container che
+vogliono lo stesso alias. In tutto, oltre venti configurazioni.
+
 La suite verifica che i nomi risolvano davvero (`getent ahostsv4`), che le
 porte giuste rispondano `HTTP 200`, che il ciclo di vita segua Docker, che
 l'agente sopravviva a un `kill -9`, e che la web UI rifletta lo stato.
@@ -437,7 +538,7 @@ metà delle verifiche non avrebbe significato.
 
 Il test più importante avvia un **processo figlio** che riscrive il file in
 continuo e lo termina con `SIGKILL` a un momento scelto dall'OS, poi verifica
-che il file resti utilizzabile e che un riavverso converga. Un `kill -9` vero,
+che il file resti utilizzabile e che un riavvio converga. Un `kill -9` vero,
 non simulato: solo un vero kill lascia sul disco lo stato che conta.
 
 ```console
@@ -451,8 +552,9 @@ $ go test -tags=integration -v -run TestCrashDuringWrites ./test/integration/
 
 `.github/workflows/ci.yml` esegue:
 
-- **lint** — gofmt, `go vet`, staticcheck, test con race detector, build;
+- **lint** — gofmt, `go vet`, golangci-lint, test con race detector, build;
 - **integration** — matrix Docker **25, 26, 27, 28, 29** (dind);
+- **e2e** — la web UI in Chrome con Playwright, contro un agente e container veri;
 - **rhel** — smoke test su Fedora, dove `/etc/resolv.conf` è gestito da
   NetworkManager e non da systemd-resolved;
 - **image** — build e ispezione dell'immagine.
@@ -462,8 +564,9 @@ $ go test -tags=integration -v -run TestCrashDuringWrites ./test/integration/
 ## Architettura
 
 ```
-cmd/docker-hoster-injector/    main: segnali, lifecycle
+cmd/docker-hoster-injector/    main: comandi, segnali, watchdog di arresto
 internal/
+  agent/        ciclo di vita: avvio, esecuzione, arresto che rimuove il blocco, clean, healthcheck
   config/       da ambiente a configurazione validata
   naming/       nomi Docker → nomi host, sanitizzazione, collisioni
   hostsfile/    parsing, rendering, scrittura atomica, recovery
@@ -473,8 +576,9 @@ internal/
   watcher/      eventi + resync, con backoff
   reconcile/    stato desiderato, regole di inclusione, collisioni
   apply/        scrittura singola con debounce
-  webui/        pagina, API JSON, stream SSE, metriche
-test/integration/              acceptance test con crash reali
+  webui/        pagina, API JSON, link di accesso, stream SSE, metriche
+test/integration/              acceptance test: crash, uscite, immagine, web UI
+test/e2e/                      Playwright: la web UI in un browser vero
 ```
 
 Le dipendenze sono volutamente minime: solo il client Docker ufficiale e
@@ -560,6 +664,13 @@ docker logs -f docker-hoster-injector
 
 Al riavvio il recovery ripara i blocchi non terminati; la riconciliazione
 successiva ricostruisce tutti i record.
+
+Per togliere i record senza far ripartire l'agente (dopo un `kill -9`, o prima di
+disinstallarlo):
+
+```bash
+docker run --rm -v /etc/hosts:/etc/hosts docker-hoster-injector:dev clean
+```
 
 ---
 

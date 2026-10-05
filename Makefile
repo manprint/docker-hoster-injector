@@ -54,12 +54,16 @@ vet: ## Run go vet
 	@$(GO) vet ./...
 
 .PHONY: lint
-lint: ## Run staticcheck when available, always run vet
+lint: ## Run vet and golangci-lint (staticcheck, errcheck, revive, gosec), also over the integration tests
 	@$(GO) vet ./...
-	@if command -v staticcheck >/dev/null 2>&1; then \
+	@$(GO) vet -tags=integration ./...
+	@if command -v golangci-lint >/dev/null 2>&1; then \
+		golangci-lint run ./... && golangci-lint run --build-tags integration ./...; \
+	elif command -v staticcheck >/dev/null 2>&1; then \
+		echo "$(YLW)WARN$(RST) golangci-lint not installed, running staticcheck only"; \
 		staticcheck ./...; \
 	else \
-		echo "$(YLW)WARN$(RST) staticcheck not installed, skipping"; \
+		echo "$(YLW)WARN$(RST) no linter installed, skipping"; \
 	fi
 
 .PHONY: test
@@ -79,6 +83,14 @@ cover: ## Run unit tests and report coverage
 test-integration: build ## Run the acceptance tests against the local Docker daemon
 	@echo "$(DIM)integration$(RST) requires a Docker daemon and will provision containers"
 	@$(GO) test $(GOFLAGS) -tags=integration -count=1 -timeout=20m -v ./test/integration/...
+
+.PHONY: test-e2e
+test-e2e: build ## Run the browser tests of the web UI (Playwright, system Chrome, Docker)
+	@cd test/e2e && npm ci --no-audit --no-fund && npx playwright test
+
+.PHONY: fuzz
+fuzz: ## Fuzz the hosts file round trip for 30s
+	@$(GO) test ./internal/hostsfile -run '^$$' -fuzz FuzzAddThenClearRoundTrip -fuzztime 30s
 
 .PHONY: tidy
 tidy: ## Tidy go.mod / go.sum

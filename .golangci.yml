@@ -1,0 +1,48 @@
+version: "2"
+
+# The set BestPractice.md §9 asks for.
+linters:
+  default: none
+  enable:
+    - staticcheck
+    - errcheck
+    - govet
+    - revive
+    - gosec
+  settings:
+    revive:
+      rules:
+        - name: exported
+        - name: package-comments
+        - name: error-return
+        - name: error-naming
+        - name: error-strings
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: receiver-naming
+        - name: indent-error-flow
+        - name: var-naming
+        - name: unused-parameter
+        - name: blank-imports
+        - name: dot-imports
+        - name: increment-decrement
+        - name: range
+        - name: time-naming
+        - name: unreachable-code
+    gosec:
+      excludes:
+        # The hosts file is world-readable by design (0644) and the state
+        # directory is created 0755: both are what /etc/hosts needs.
+        - G301
+        - G302
+        - G306
+  exclusions:
+    rules:
+      # Test helpers write fixtures wherever they like and spawn the binary
+      # under test.
+      - path: _test\.go
+        linters: [gosec, errcheck]
+
+formatters:
+  enable:
+    - gofmt

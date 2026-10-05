@@ -30,7 +30,7 @@ func (s *Server) buildSnapshot(res reconcile.Result) Snapshot {
 		containerID string
 		container   string
 		state       string
-		addresses   []string
+		entries     []reconcile.Entry
 		names       []string
 	}
 
@@ -48,7 +48,7 @@ func (s *Server) buildSnapshot(res reconcile.Result) Snapshot {
 			byID[e.ContainerID] = r
 			order = append(order, e.ContainerID)
 		}
-		r.addresses = append(r.addresses, e.IP.String())
+		r.entries = append(r.entries, e)
 		r.names = append(r.names, e.Names...)
 	}
 
@@ -74,13 +74,15 @@ func (s *Server) buildSnapshot(res reconcile.Result) Snapshot {
 		// file on disk and the page agree on what resolves where. The
 		// addresses keep the order of the file, which is the order a resolver
 		// tries them in.
-		for _, addr := range r.addresses {
+		for _, e := range r.entries {
 			snap.Records = append(snap.Records, Record{
-				Address:     addr,
+				Address:     e.IP.String(),
 				Names:       names,
 				Container:   r.container,
 				ContainerID: r.containerID,
 				State:       r.state,
+				Side:        string(e.Side),
+				Links:       s.linksFor(e, names),
 			})
 		}
 		snap.Summary.Containers++

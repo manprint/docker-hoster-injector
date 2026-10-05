@@ -274,11 +274,11 @@ func removeNetwork(name string) {
 func createNetwork(name string) {
 	var lastErr error
 	for attempt := 0; attempt < 20; attempt++ {
-		if out, err := run(30*time.Second, "docker", "network", "create", name); err == nil {
+		out, err := run(30*time.Second, "docker", "network", "create", name)
+		if err == nil {
 			return
-		} else {
-			lastErr = fmt.Errorf("%w: %s", err, strings.TrimSpace(out))
 		}
+		lastErr = fmt.Errorf("%w: %s", err, strings.TrimSpace(out))
 		removeNetwork(name)
 		time.Sleep(300 * time.Millisecond)
 	}
