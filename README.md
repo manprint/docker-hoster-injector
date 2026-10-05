@@ -87,7 +87,7 @@ pubblicati, che si aggiorna da sola.
 | `GET /` | La pagina, con lo snapshot già incorporato: la tabella è popolata al primo rendering |
 | `GET /api/entries` | Lo stesso dato in JSON, per script e per il fallback |
 | `GET /api/config` | La configurazione della distribuzione |
-| `GET /api/events` | Stream SSE: ogni messaggio è uno snapshot completo |
+| `GET /api/events` | Stream SSE: ogni messaggio è uno snapshot completo. Assente con `WEB_EVENTS=false`: la pagina interroga allora `/api/entries` ogni 5 s |
 | `GET /healthz` | `503` se l'ultima applicazione è fallita |
 | `GET /metrics` | Contatori in formato Prometheus |
 
@@ -98,6 +98,10 @@ senza dover riprodurre una cronologia che potrebbe aver perso.
 La pagina è interamente autosufficiente: foglio di stile e logica sono
 incorporati, nessuna richiesta esterna. Serve perché il servizio gira spesso
 su reti isolate.
+
+Ogni risposta porta una `Content-Security-Policy` restrittiva (niente risorse
+esterne, niente frame), `X-Content-Type-Options: nosniff` e
+`Referrer-Policy: no-referrer`.
 
 **Non ha autenticazione**, come richiesto. È accettabile solo perché è
 **read-only**: qualsiasi metodo diverso da `GET` e `HEAD` riceve `405`, quindi
@@ -304,14 +308,34 @@ scrittura innocua anche sotto crash.
 
 ### Cosa fa il recovery
 
-Al riavvio l'agente ispeziona il file e interviene se trova un blocco non
-terminato (l'impronta di un crash), un file mancante o vuoto. Un blocco
-lasciato aperto viene **ricostruito**, non esteso, così i record orfani non
-sopravvivono.
+Al riavvio l'agente ispeziona il file. Un blocco lasciato aperto (senza
+marcatore finale: l'impronta di un crash) viene **ricostruito**, non esteso, così
+i record orfani non sopravvivono. Del blocco aperto si scartano solo
+l'intestazione generata e le righe i cui nomi stanno sotto `DNS_SUFFIX`:
+**qualsiasi altra riga resta**, perché lo stesso aspetto lo ha un file in cui
+qualcuno ha cancellato a mano il marcatore finale e ha continuato a scrivere.
 
 ```bash
 docker restart docker-hoster-injector
 ```
+
+### Comportamenti da conoscere
+
+- **All'arresto il blocco resta nel file.** L'agente non lo rimuove con `SIGTERM`:
+  se un container sparisce mentre l'agente è fermo, il suo record resta finché
+  l'agente non riparte. Per toglierlo a mano basta cancellare le righe tra
+  `BEGIN docker-hoster-injector` e `END docker-hoster-injector`.
+- **Mount del singolo file (`file`) e inode.** Un bind mount segue l'inode, non il
+  percorso: se qualcosa sull'host *sostituisce* `/etc/hosts` con un rename
+  (alcuni editor, `sed -i`, certi tool di provisioning), il container continua a
+  scrivere sul vecchio file e l'host non vede più i record. In quel caso
+  `docker restart docker-hoster-injector`, oppure usare la modalità `dir`.
+- **Il socket `:ro` non limita l'API.** `:ro` impedisce di modificare il file del
+  socket, non le richieste che vi passano.
+- **Dopo un riavvio del daemon Docker** lo stream di eventi viene riaperto da
+  solo, con backoff, e ogni riconnessione innesca una riconciliazione.
+- **Ogni chiamata a Docker ha un timeout** (15 s): un daemon che non risponde non
+  blocca la scrittura del file per sempre.
 
 ### Il limite, dichiarato
 
@@ -337,7 +361,8 @@ make test-integration
 make image
 ```
 
-Toolchain richiesta: **Go 1.25 o successivo**.
+Toolchain: il progetto dichiara `go 1.25` come minimo ed è sviluppato e testato con
+**Go 1.27** (riga `toolchain` di `go.mod`, immagine `golang:1.27-alpine`).
 
 ---
 
@@ -349,11 +374,12 @@ make test-race         # obbligatorio: la concorrenza è il cuore del progetto
 make test-integration  # crash, concorrenza e naming, dietro build tag
 ```
 
-Copertura attuale: **~77%** delle dichiarazioni (`version` 100%, `reconcile`
-94%, `config` 93%, `naming` 93%, `apply` 91%, `webui` 90%, `watcher` 89%,
-`hostsfile` 88%). `dockerclient` è più bassa di proposito: quasi tutto quel
-package parla con il daemon, ed è coperto dai test di accettazione piuttosto
-che da mock.
+Copertura attuale: **~81%** delle dichiarazioni (`version` 100%, `reconcile`
+95%, `webui` 93%, `config` 93%, `naming` 93%, `watcher` 92%, `apply` 91%,
+`hostsfile` 86%, `dockerclient` 60%). `dockerclient` è più bassa perché quasi
+tutto quel package parla con il daemon; la parte più delicata, lo stream di
+eventi, è però coperta da un finto daemon HTTP nei test unitari: un test di
+accettazione non basta a vedere uno stream che si chiude senza avvisare.
 
 ### Cosa coprono
 
@@ -370,6 +396,8 @@ che da mock.
 ### I test di accettazione
 
 `sudo make test-integration` esegue la suite completa contro il Docker locale.
+**Modifica il vero `/etc/hosts`** (con backup, vedi sotto): va lanciata su una
+macchina di sviluppo.
 L'estate comprende quindici container che coprono ogni regola:
 
 | Container | Cosa verifica |
@@ -449,8 +477,8 @@ internal/
 test/integration/              acceptance test con crash reali
 ```
 
-Le dipendenze sono volutamente minime: solo il client Docker ufficiale, più
-`golang.org/x/sys` per `flock`. Niente framework di test.
+Le dipendenze sono volutamente minime: solo il client Docker ufficiale e
+le sue dipendenze transitive. Il `flock` usa `syscall`. Niente framework di test.
 
 ### Note di implementazione
 
@@ -508,8 +536,10 @@ preferire il DNS. Il record è comunque in `/etc/hosts`; verificare con
 
 ### `/etc/hosts` non scrivibile
 
-L'agente non muore: riprova con backoff e registra l'errore. In un container
-senza permessi è sufficiente aggiungere `--user`. Verificare con:
+L'agente non muore: registra l'errore e riprova al prossimo evento o resync.
+Con `cap_drop: ALL` il container (root) può scrivere solo un file di cui è
+proprietario: `/etc/hosts` dell'host è di root, quindi va bene, mentre un file
+di un altro utente no. Verificare con:
 
 ```bash
 docker logs docker-hoster-injector | grep -i 'write\|permission'

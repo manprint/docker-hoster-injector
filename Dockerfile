@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1
 
 # ---- build ----------------------------------------------------------------
-# Pinned to the same major the project targets. The toolchain layer is the
-# only thing that needs a full Go distribution; everything else is static.
-FROM golang:1.25-alpine AS build
+# Built with the Go release the project is developed on (the toolchain line of
+# go.mod). The toolchain layer is the only thing that needs a full Go
+# distribution; everything else is static.
+FROM golang:1.27-alpine AS build
 
 # git is only required when the build resolves VCS information for the
 # version stamp, and it is removed from the final image anyway.

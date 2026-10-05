@@ -116,7 +116,7 @@ func (w *Writer) adoptLocked() error {
 		w.lastGood = nil
 		return nil
 	case err != nil:
-		return fmt.Errorf("read %s: %w", w.path, err)
+		return fmt.Errorf("read the hosts file: %w", err)
 	}
 
 	if _, perr := Parse(bytes.NewReader(data)); perr != nil {
@@ -148,7 +148,7 @@ func (w *Writer) Apply(entries []Entry) (changed bool, err error) {
 	case errors.Is(err, fs.ErrNotExist):
 		current = nil
 	case err != nil:
-		return false, fmt.Errorf("read %s: %w", w.path, err)
+		return false, fmt.Errorf("read the hosts file: %w", err)
 	}
 
 	f, err := Parse(bytes.NewReader(current))
@@ -270,7 +270,7 @@ func (w *Writer) writeAtomic(data []byte) error {
 func (w *Writer) writeInPlace(data []byte) error {
 	f, err := os.OpenFile(w.path, os.O_RDWR|os.O_CREATE, DefaultPerm)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", w.path, err)
+		return fmt.Errorf("open the hosts file for writing: %w", err)
 	}
 	defer func() {
 		// Releasing the lock and closing are both best effort at this point:
@@ -347,7 +347,7 @@ func (w *Writer) Repair() (repaired bool, err error) {
 	case rerr != nil && errors.Is(rerr, fs.ErrNotExist):
 		// fall through to restore
 	case rerr != nil:
-		return false, fmt.Errorf("read %s: %w", w.path, rerr)
+		return false, fmt.Errorf("read the hosts file: %w", rerr)
 	case len(data) == 0:
 		// fall through to restore
 	default:

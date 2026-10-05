@@ -22,7 +22,9 @@ services:
       # WEB_ADDR: ":8080"
 
     volumes:
-      # Read-only is enough: the agent only needs to watch the lifecycle.
+      # The agent only reads, so :ro is the honest declaration. It does not
+      # restrict what can be asked through the socket, though: treat access to
+      # it as root on the host.
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
       # Option A, least privilege: mount the single file. Writes are then
