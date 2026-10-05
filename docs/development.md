@@ -120,10 +120,10 @@ $ go test -tags=integration -v -run TestCrashDuringWrites ./test/integration/
 - **lint** — gofmt, `go vet`, golangci-lint (versione fissata), test con race
   detector, copertura, build e verifica che il binario sia statico;
 - **integration** — la suite completa come root (`make test-integration
-  SUDO="sudo -E"`) contro Docker **25, 26, 27, 28, 29** (dind). Le versioni
-  **20.10** e **23** sono nella matrice come *sperimentali*: un loro
-  fallimento è segnalato ma non fa fallire il workflow, finché non hanno uno
-  storico di successi;
+  SUDO="sudo -E"`) contro il Docker del runner. Più versioni del motore non sono
+  in matrice: un daemon dind in `--network host` condividerebbe iptables e `docker0`
+  con quello del runner. La compatibilità con le API più vecchie è coperta dal
+  test con richieste legate alla versione;
 - **e2e** — la web UI in Chrome con Playwright, contro un agente e container veri;
 - **smoke** — `make smoke`: il vero `docker-compose.yml`, un container reale, la
   risoluzione del nome, la sostituzione di `/etc/hosts` con un rename e il file
@@ -138,6 +138,6 @@ con richieste legate a ciascuna versione API da 1.40 a 1.44
 (`DOCKER_API_VERSION`) contro un daemon reale
 (`test/integration/apiversion_test.go`) e con un test unitario sulla soglia. Non
 è stato provato su un motore realmente così vecchio dalla macchina di sviluppo:
-è lo scopo delle voci sperimentali della matrice CI.
+andrebbe confermato su un motore vecchio vero prima di contarci.
 
 [← README](../README.md)

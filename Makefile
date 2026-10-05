@@ -42,9 +42,9 @@ $(BIN_DIR):
 	@mkdir -p $(BIN_DIR)
 
 .PHONY: build
-build: ## Compile the binary into ./bin
+build: ## Compile the static binary into ./bin (CGO_ENABLED=0, like the image)
 	@echo "$(DIM)build$(RST) $(BINARY)"
-	@$(GO) build $(GOFLAGS) $(BUILDFLAGS) -o $(BIN_DIR)/$(BINARY) $(CMD)
+	@CGO_ENABLED=0 $(GO) build $(GOFLAGS) $(BUILDFLAGS) -o $(BIN_DIR)/$(BINARY) $(CMD)
 	@echo "$(GRN)OK$(RST) $(BIN_DIR)/$(BINARY)"
 
 .PHONY: run

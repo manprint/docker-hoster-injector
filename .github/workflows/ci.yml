@@ -65,39 +65,15 @@ jobs:
           ! ldd bin/docker-hoster-injector
 
   # The whole point of the project: does the host actually resolve the name?
-  # Runs against real Docker engines. The supported floor is API 1.40 (Docker
-  # 19.03); 20.10 and 23 are the oldest engines available as dind images, and
-  # are marked experimental until they have a record of passing: a failure there
-  # is reported but does not fail the workflow.
+  # It runs against the Docker engine of the runner, as root, because the suite
+  # rewrites /etc/hosts (backed up and restored). Older engines cannot share the
+  # runner's network namespace safely, so compatibility with older API versions
+  # is checked by the API-pinned test in the suite instead
+  # (test/integration/apiversion_test.go).
   integration:
-    name: integration (docker ${{ matrix.docker }})
+    name: integration
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    continue-on-error: ${{ matrix.experimental }}
-    strategy:
-      fail-fast: false
-      matrix:
-        docker: ['25', '26', '27', '28', '29']
-        experimental: [false]
-        include:
-          - docker: '20.10'
-            experimental: true
-          - docker: '23'
-            experimental: true
-    services:
-      docker:
-        image: docker:${{ matrix.docker }}-dind
-        options: >-
-          --privileged
-          --name docker-dind-${{ matrix.docker }}
-          --network host
-          --dns 8.8.8.8
-          --env DOCKER_TLS_CERTDIR=
-        ports:
-          - 2375:2375
-    env:
-      DOCKER_HOST: tcp://localhost:2375
-      TESTCONTAINERS_RYUK_DISABLED: 'true'
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -106,27 +82,21 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      - name: Wait for the Docker daemon
-        run: |
-          for i in $(seq 1 60); do
-            if docker version; then
-              echo "daemon is up"
-              exit 0
-            fi
-            echo "waiting for docker ($i/60)"
-            sleep 2
-          done
-          echo "::error::Docker daemon never became ready"
-          exit 1
-
-      - name: Report the engine version under test
+      - name: Report the engine under test
         run: |
           docker version
           echo "API version: $(docker version --format '{{.Server.APIVersion}}')"
 
-      # Root is needed to rewrite /etc/hosts; -E keeps DOCKER_HOST.
+      # Root is needed to rewrite /etc/hosts; -E keeps the environment.
       - name: Integration tests
-        run: make test-integration SUDO="sudo -E"
+        run: |
+          set +e
+          make test-integration SUDO="sudo -E" 2>&1 | tee integration.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            echo "::error title=integration failed::$(grep -E '^(---|    ---|FAIL|panic|\s+[a-z_]+_test.go:)' integration.log | grep -v PASS | tail -n 40 | sed ':a;N;$!ba;s/\n/%0A/g')"
+          fi
+          exit "$status"
 
       - name: Build the image
         run: docker build -t docker-hoster-injector:ci .
@@ -151,7 +121,14 @@ jobs:
           cache-dependency-path: test/e2e/package-lock.json
 
       - name: Browser tests
-        run: make test-e2e
+        run: |
+          set +e
+          make test-e2e 2>&1 | tee e2e.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            echo "::error title=e2e failed::$(tail -n 60 e2e.log | sed ':a;N;$!ba;s/\n/%0A/g')"
+          fi
+          exit "$status"
 
       - name: Keep the traces of a failure
         if: failure()
