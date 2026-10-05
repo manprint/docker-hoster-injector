@@ -2,6 +2,7 @@ package dockerclient
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -394,5 +395,48 @@ func TestAliasesStayOnTheirOwnNetwork(t *testing.T) {
 	}
 	if got := byName["unrelated"]; len(got) != 0 {
 		t.Errorf("unrelated aliases = %v, want none", got)
+	}
+}
+
+// The floor is checked against what the daemon says it speaks: one step below
+// it the agent refuses to start, and says why; at it, and above it, it starts.
+func TestInfoEnforcesTheAPIFloor(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		api     string
+		wantErr bool
+	}{
+		{"1.39", true},
+		{"1.9", true}, // numerically older, though it sorts after "1.40" as text
+		{MinAPIVersion, false},
+		{"1.44", false},
+		{"1.56", false},
+	} {
+		t.Run(tc.api, func(t *testing.T) {
+			t.Parallel()
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Api-Version", tc.api)
+				w.Header().Set("Ostype", "linux")
+				if strings.HasSuffix(r.URL.Path, "/version") {
+					_, _ = w.Write([]byte(`{"Version":"19.03.15"}`))
+					return
+				}
+				_, _ = w.Write([]byte("OK"))
+			}))
+			info, err := c.Info(context.Background())
+			if tc.wantErr {
+				if !errors.Is(err, ErrUnsupportedAPI) {
+					t.Fatalf("err = %v, want ErrUnsupportedAPI", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("API %s must be accepted: %v", tc.api, err)
+			}
+			if info.APIVersion != tc.api {
+				t.Errorf("APIVersion = %q, want %q", info.APIVersion, tc.api)
+			}
+		})
 	}
 }

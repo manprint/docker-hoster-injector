@@ -32,7 +32,11 @@
 
 <main>
   <table id="published">
-    <caption>Published records</caption>
+    <caption>Published containers</caption>
+    <colgroup>
+      <col class="c-container"><col class="c-state"><col class="c-address">
+      <col class="c-names"><col class="c-open">
+    </colgroup>
     <thead>
       <tr><th>Container</th><th>State</th><th>Address</th><th>Names</th><th>Open</th></tr>
     </thead>
@@ -41,6 +45,9 @@
 
   <table id="skipped">
     <caption>Not published</caption>
+    <colgroup>
+      <col class="s-container"><col class="s-state"><col class="s-reason">
+    </colgroup>
     <thead>
       <tr><th>Container</th><th>State</th><th>Reason</th></tr>
     </thead>
@@ -66,46 +73,76 @@ function render(snap) {
   const filter = document.getElementById('filter').value.trim().toLowerCase();
   const match = (s) => !filter || s.toLowerCase().includes(filter);
 
-  const published = snap.records.filter(r => match(r.container + ' ' + r.address + ' ' + r.names.join(' ') + ' ' + r.links.map(l => l.label).join(' ')));
+  const groups = groupByContainer(snap.records).filter(g =>
+    match(g.container + ' ' + g.addresses.join(' ') + ' ' + g.names.join(' ') + ' ' + g.links.map(l => l.label + ' ' + l.protocol).join(' ')));
   const skipped = snap.skipped.filter(r => match(r.container + ' ' + r.reason));
 
   const pbody = document.querySelector('#published tbody');
-  pbody.replaceChildren(...published.map(r => {
+  pbody.replaceChildren(...groups.map(g => {
     const tr = document.createElement('tr');
-    tr.dataset.key = r.container_id + '|' + r.address;
-    cell(tr, r.container, '', 'Container');
-    cell(tr, r.state, 'state-' + r.state, 'State');
-    cell(tr, r.address, 'addr', 'Address');
-    const td = document.createElement('td');
-    td.dataset.label = 'Names';
-    for (const n of r.names) {
+    tr.dataset.key = g.id;
+    cell(tr, g.container, 'container', 'Container');
+    cell(tr, g.state, 'state state-' + g.state, 'State');
+
+    const addr = document.createElement('td');
+    addr.className = 'addr';
+    addr.dataset.label = g.addresses.length > 1 ? 'Addresses' : 'Address';
+    for (const a of g.addresses) {
+      const line = document.createElement('div');
+      line.textContent = a;
+      addr.appendChild(line);
+    }
+    tr.appendChild(addr);
+
+    const names = document.createElement('td');
+    names.dataset.label = 'Names';
+    for (const n of g.names) {
       const code = document.createElement('code');
       code.className = 'name';
       code.textContent = n;
-      td.appendChild(code);
+      names.appendChild(code);
     }
-    tr.appendChild(td);
-    tr.appendChild(links(r.links));
+    tr.appendChild(names);
+    tr.appendChild(links(g.links));
     return tr;
   }));
 
   const sbody = document.querySelector('#skipped tbody');
   sbody.replaceChildren(...skipped.map(r => {
     const tr = document.createElement('tr');
-    cell(tr, r.container, '', 'Container');
-    cell(tr, r.state, 'state-' + r.state, 'State');
+    cell(tr, r.container, 'container', 'Container');
+    cell(tr, r.state, 'state state-' + r.state, 'State');
     cell(tr, r.reason, 'reason', 'Reason');
     return tr;
   }));
 
-  document.getElementById('empty').hidden = published.length > 0;
+  document.getElementById('empty').hidden = groups.length > 0;
   document.querySelector('#published caption').textContent =
-    'Published records (' + published.length + ')';
+    'Published containers (' + groups.length + ')';
   document.querySelector('#skipped caption').textContent =
     'Not published (' + skipped.length + ')';
 
   header(snap);
   highlightChanged();
+}
+
+// One row per container: the snapshot has one record per address, but a person
+// reads "this container, reachable here and here", not the same container
+// again for every address. Order follows the snapshot, which is already by
+// container name, and the order of the addresses inside a container is kept:
+// it is the order the resolver tries them in.
+function groupByContainer(records) {
+  const byID = new Map();
+  for (const r of records) {
+    let g = byID.get(r.container_id);
+    if (!g) {
+      g = { id: r.container_id, container: r.container, state: r.state, addresses: [], names: r.names, links: [] };
+      byID.set(r.container_id, g);
+    }
+    g.addresses.push(r.address);
+    g.links.push(...r.links);
+  }
+  return [...byID.values()];
 }
 
 // Only http and https are ever turned into links, whatever the snapshot says:
@@ -128,10 +165,20 @@ function links(list) {
     } else {
       el = document.createElement('span');
       el.className = 'noweb';
-      el.title = l.protocol + ' port, not opened as a web page';
+      el.title = (l.protocol || 'tcp').toUpperCase() + ' port, not opened as a web page';
     }
     el.classList.add('link');
-    el.textContent = l.label;
+    // The protocol is always said, in words and not only in colour: a TCP and a
+    // UDP port with the same number are two different services.
+    const proto = (l.protocol || 'tcp').toLowerCase();
+    el.dataset.proto = proto;
+    const dest = document.createElement('span');
+    dest.className = 'dest';
+    dest.textContent = l.label;
+    const tag = document.createElement('span');
+    tag.className = 'proto proto-' + (proto === 'udp' ? 'udp' : 'tcp');
+    tag.textContent = proto.toUpperCase();
+    el.append(dest, tag);
     td.appendChild(el);
   }
   return td;

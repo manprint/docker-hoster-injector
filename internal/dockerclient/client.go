@@ -27,9 +27,14 @@ import (
 // supports.
 var ErrUnsupportedAPI = errors.New("unsupported Docker API version")
 
-// MinAPIVersion is the oldest engine this agent is tested against, which is
-// Docker 25. It is checked against the engine's reported API version.
-const MinAPIVersion = "1.44"
+// MinAPIVersion is the oldest API this agent is tested against, which is Docker
+// 19.03. It is checked against the engine's reported API version. The agent
+// uses only the container list, the event stream and the engine version, all of
+// which are older than that. Requests pinned to every version from 1.40 upward
+// are exercised against a real daemon (see test/integration/apiversion_test.go),
+// but no engine older than the 1.40 floor of the current daemon is available to
+// the tests, so the floor is a verified lower bound and not a guess.
+const MinAPIVersion = "1.40"
 
 // maxInspectConcurrency bounds how many containers are inspected at once when
 // recovering their network aliases. Too high and a busy host produces a burst
@@ -171,7 +176,7 @@ type Options struct {
 // New builds a client and verifies the daemon is usable.
 func New(ctx context.Context, opts Options) (*Client, error) {
 	// Version negotiation is the client's default: one binary works against
-	// Docker 25 through 29 and beyond because the client downgrades to whatever
+	// Docker 19.03 through 29 and beyond because the client downgrades to whatever
 	// the daemon supports. It is switched off only by pinning a version below.
 	var apiOpts []client.Opt
 	switch {
@@ -227,8 +232,8 @@ func (c *Client) Info(ctx context.Context) (EngineInfo, error) {
 	// letting the agent run against an engine whose API does not provide the
 	// endpoints it relies on, and failing much later with a 404.
 	if ping.APIVersion != "" && !version.AtLeast(ping.APIVersion, MinAPIVersion) {
-		return info, fmt.Errorf("%w: the daemon speaks API %s but at least %s (Docker 25) is required; "+
-			"upgrade Docker or pin DOCKER_API_VERSION", ErrUnsupportedAPI, ping.APIVersion, MinAPIVersion)
+		return info, fmt.Errorf("%w: the daemon speaks API %s but at least %s (Docker 19.03) is required; "+
+			"upgrade Docker", ErrUnsupportedAPI, ping.APIVersion, MinAPIVersion)
 	}
 
 	ver, err := c.api.ServerVersion(ctx, client.ServerVersionOptions{})

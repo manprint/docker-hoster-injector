@@ -74,7 +74,19 @@ func (s *Server) buildSnapshot(res reconcile.Result) Snapshot {
 		// file on disk and the page agree on what resolves where. The
 		// addresses keep the order of the file, which is the order a resolver
 		// tries them in.
+		links := s.linksByEntry(r.entries, names)
+		hasV4 := false
 		for _, e := range r.entries {
+			hasV4 = hasV4 || isIPv4(e.IP)
+		}
+		for i, e := range r.entries {
+			// The page lists IPv4 only: the IPv6 twin of a record adds a row
+			// and nothing a person acts on. The hosts file keeps both. An IPv6
+			// address is still shown when it is the only way to reach the
+			// container, or when a link hangs on it.
+			if !isIPv4(e.IP) && hasV4 && len(links[i]) == 0 {
+				continue
+			}
 			snap.Records = append(snap.Records, Record{
 				Address:     e.IP.String(),
 				Names:       names,
@@ -82,7 +94,7 @@ func (s *Server) buildSnapshot(res reconcile.Result) Snapshot {
 				ContainerID: r.containerID,
 				State:       r.state,
 				Side:        string(e.Side),
-				Links:       s.linksFor(e, names),
+				Links:       links[i],
 			})
 		}
 		snap.Summary.Containers++

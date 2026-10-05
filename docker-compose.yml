@@ -18,6 +18,14 @@ services:
       # The base domain. A container named "nginx" becomes nginx.docker.local.
       DNS_SUFFIX: docker.local
 
+      # The hosts file is reached through the directory mount below. In this
+      # mode the agent writes a temporary file next to it and renames it over
+      # the original, so the update is atomic and survives anything on the host
+      # that replaces /etc/hosts with a rename (the inode changes, the directory
+      # does not). A single-file bind mount would keep writing to the old inode.
+      HOSTS_FILE: /host/etc/hosts
+      HOSTS_MOUNT_MODE: dir
+
       # Optional tuning, shown with their defaults.
       # TARGET_MODE: both          # both | published | container-ip
       # RESYNC_INTERVAL: 30s       # full reconciliation period
@@ -32,16 +40,12 @@ services:
       # it as root on the host.
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
-      # Option A, least privilege: mount the single file. Writes are then
-      # in-place but still a single write(2), so the window of incoherence is
-      # measured in microseconds.
-      - /etc/hosts:/etc/hosts
-
-      # Option B, fully atomic: drop this line above and mount the directory
-      # instead, then set HOSTS_FILE and HOSTS_MOUNT_MODE accordingly.
-      #   - /etc:/host/etc
-      #   HOSTS_FILE: /host/etc/hosts
-      #   HOSTS_MOUNT_MODE: dir
+      # The directory of the hosts file, writable: the atomic update needs to
+      # create a file next to /etc/hosts. The agent touches nothing else in it.
+      # Prefer this over mounting the single file (-v /etc/hosts:/etc/hosts
+      # with the default HOSTS_MOUNT_MODE=file), which stops working if the file
+      # is ever replaced on the host.
+      - /etc:/host/etc
 
     ports:
       # The read-only monitoring table. Bound to loopback because the API has

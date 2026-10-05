@@ -18,6 +18,11 @@ async function snapshot(base = state.base): Promise<Snap> {
   return r.json() as Promise<Snap>;
 }
 
+// The page lists one row per container.
+function containersOf(snap: Snap): string[] {
+  return [...new Set(snap.records.map((r) => r.container_id))];
+}
+
 const WANT = ['pw-web', 'pw-internal', 'pw-multi', 'pw-db', 'pw-udp', 'pw-twonets', 'pw-compose_web_1', 'pw-clash-a', 'pw-clash-b'];
 
 test.beforeAll(async () => {
@@ -43,7 +48,8 @@ test('the page shows what the API says, with no errors', async ({ page }) => {
   await expect(page.locator('#state')).toHaveText('live');
 
   const snap = await snapshot();
-  await expect(page.locator('#published tbody tr')).toHaveCount(snap.records.length);
+  // One row per container, however many addresses it has.
+  await expect(page.locator('#published tbody tr')).toHaveCount(containersOf(snap).length);
   await expect(page.locator('#skipped tbody tr')).toHaveCount(snap.skipped.length);
 
   const pills = await page.locator('.stat .pill').allTextContents();
@@ -57,17 +63,29 @@ test('the page shows what the API says, with no errors', async ({ page }) => {
   expect(problems).toEqual([]);
 });
 
-test('every row shows its container, state, address and names', async ({ page }) => {
+test('every row shows its container, state, addresses and names', async ({ page }) => {
   await page.goto(state.base);
   const snap = await snapshot();
-  for (const r of snap.records) {
-    const row = page.locator(`#published tbody tr[data-key="${r.container_id}|${r.address}"]`);
+  for (const id of containersOf(snap)) {
+    const recs = snap.records.filter((r) => r.container_id === id);
+    const row = page.locator(`#published tbody tr[data-key="${id}"]`);
     await expect(row).toHaveCount(1);
-    await expect(row.locator('td').nth(0)).toHaveText(r.container);
-    await expect(row.locator('td').nth(1)).toHaveText(r.state);
-    await expect(row.locator('td').nth(2)).toHaveText(r.address);
-    await expect(row.locator('td').nth(3).locator('code.name')).toHaveText(r.names);
+    await expect(row.locator('td').nth(0)).toHaveText(recs[0].container);
+    await expect(row.locator('td').nth(1)).toHaveText(recs[0].state);
+    // The addresses, one per line, in the order the resolver tries them.
+    await expect(row.locator('td.addr div')).toHaveText(recs.map((r) => r.address));
+    await expect(row.locator('td').nth(3).locator('code.name')).toHaveText(recs[0].names);
   }
+});
+
+test('IPv6 addresses are not listed', async ({ page }) => {
+  await page.goto(state.base);
+  await expect(page.locator('#published tbody tr').first()).toBeVisible();
+  const addrs = await page.locator('#published td.addr div').allTextContents();
+  expect(addrs.length).toBeGreaterThan(5);
+  expect(addrs.filter((a) => a.includes(':'))).toEqual([]);
+  // The file keeps them: the agent still publishes ::1 for a published port.
+  expect(readFileSync(state.hosts, 'utf8')).toContain('::1');
 });
 
 test('the hosts file agrees with the page', async () => {
@@ -78,6 +96,7 @@ test('the hosts file agrees with the page', async () => {
   const block = file.slice(file.indexOf('# BEGIN docker-hoster-injector'));
   expect(block).toContain('# END docker-hoster-injector');
   const snap = await snapshot();
+  expect(snap.records.length).toBeGreaterThan(5);
   for (const r of snap.records) {
     const line = block.split('\n').find((l) => l.split(/\s+/)[0] === r.address);
     expect(line, `address ${r.address} is in the file`).toBeTruthy();
@@ -102,11 +121,42 @@ test('links: web ports are anchors, other ports are plain text', async ({ page }
   }
 
   // The database and the UDP service are shown and are not anchors.
-  const plain = await page.locator('td.links span.link').allTextContents();
+  const plain = await page.locator('td.links span.link .dest').allTextContents();
   expect(plain.some((t) => t.endsWith(`:${state.ports.db}`))).toBe(true);
   expect(plain.some((t) => t.endsWith(`:${state.ports.udp}`))).toBe(true);
   const dbAnchors = anchors.filter((a) => a.text!.endsWith(`:${state.ports.db}`));
   expect(dbAnchors).toEqual([]);
+});
+
+test('every port says whether it is TCP or UDP', async ({ page }) => {
+  await page.goto(state.base);
+  const snap = await snapshot();
+  const chips = await page.locator('td.links .link').evaluateAll((els) => els.map((e) => ({
+    dest: e.querySelector('.dest')!.textContent,
+    proto: e.querySelector('.proto')!.textContent,
+    attr: (e as HTMLElement).dataset.proto,
+    color: getComputedStyle(e.querySelector('.proto')!).color,
+    border: getComputedStyle(e).borderStyle,
+  })));
+  const expected = snap.records.flatMap((r) => r.links);
+  expect(chips.length).toBe(expected.length);
+  for (const c of chips) {
+    expect(['TCP', 'UDP']).toContain(c.proto);
+    expect(c.attr).toBe(c.proto!.toLowerCase());
+  }
+  // The UDP service of the suite is marked, and looks different from TCP.
+  const udp = chips.filter((c) => c.dest!.endsWith(`:${state.ports.udp}`));
+  expect(udp.length).toBeGreaterThan(0);
+  for (const c of udp) { expect(c.proto).toBe('UDP'); expect(c.border).toBe('dashed'); }
+  const tcp = chips.filter((c) => c.dest!.endsWith(`:${state.ports.db}`));
+  expect(tcp.length).toBeGreaterThan(0);
+  for (const c of tcp) { expect(c.proto).toBe('TCP'); expect(c.border).toBe('solid'); }
+  expect(new Set(chips.map((c) => c.color)).size).toBeGreaterThan(1);
+
+  // The filter understands the protocol.
+  await page.getByLabel('Filter by container, name or address').fill('udp');
+  await expect(page.locator('#published tbody tr')).toHaveCount(
+    new Set(snap.records.filter((r) => r.links.some((l) => l.protocol === 'udp')).map((r) => r.container_id)).size);
 });
 
 test('clicking a link opens the container', async ({ page, context }) => {
@@ -123,7 +173,7 @@ test('clicking a link opens the container', async ({ page, context }) => {
 
   // The container address is always reachable, whatever the resolver says.
   const direct = (await snapshot()).records
-    .find((r) => r.container === 'pw-web' && r.side === 'container')!.links.find((l) => l.url)!;
+    .find((r) => r.container === 'pw-internal' && r.side === 'container')!.links.find((l) => l.url)!;
   const resp = await page.request.get(direct.url);
   expect(resp.status()).toBe(200);
   expect((await resp.text()).trim()).toBe('ok');
@@ -145,18 +195,25 @@ test('every link the page offers answers', async ({ page }) => {
   }
 });
 
-test('the filter narrows the table and follows live updates', async ({ page }) => {
+test('the filter narrows the table', async ({ page }) => {
   await page.goto(state.base);
   const filter = page.getByLabel('Filter by container, name or address');
   const rows = page.locator('#published tbody tr');
   const all = await rows.count();
+  const snap = await snapshot();
 
   await filter.fill('pw-twonets');
-  const snap = await snapshot();
-  await expect(rows).toHaveCount(snap.records.filter((r) => r.container === 'pw-twonets').length);
+  await expect(rows).toHaveCount(1);
 
+  // By the port of a link.
   await filter.fill(String(state.ports.db));
-  await expect(rows).toHaveCount(snap.records.filter((r) => r.links.some((l) => l.label.endsWith(`:${state.ports.db}`))).length);
+  await expect(rows).toHaveCount(
+    containersOf(snap).filter((id) => snap.records.some((r) => r.container_id === id && r.links.some((l) => l.label.endsWith(`:${state.ports.db}`)))).length);
+
+  // By an address.
+  const addr = snap.records.find((r) => r.container === 'pw-web' && r.side === 'container')!.address;
+  await filter.fill(addr);
+  await expect(rows).toHaveCount(1);
 
   await filter.fill('no-such-thing-anywhere');
   await expect(rows).toHaveCount(0);
@@ -188,7 +245,7 @@ test('a container that starts appears without a reload, and leaves when it stops
     run('live', ['--expose', '8090'], 'busybox:latest', ['sh', '-c', 'echo ok > /tmp/index.html && exec httpd -f -p 8090 -h /tmp']);
     const row = page.locator('#published tbody tr', { hasText: 'pw-live' });
     await expect(row).toHaveCount(1, { timeout: 20_000 });
-    await expect(row.locator('a.link')).toHaveText(/:8090$/);
+    await expect(row.locator('a.link .dest')).toHaveText(/:8090$/);
 
     dockerQuiet('stop', '-t', '1', PREFIX + 'live');
     await expect(row).toHaveCount(0, { timeout: 20_000 });
@@ -227,21 +284,55 @@ test('a narrow screen does not scroll sideways', async ({ page }) => {
   expect(overflow).toBeLessThanOrEqual(0);
 });
 
-test('on a wide screen no state or address is broken across lines', async ({ page }) => {
+test('on a wide screen the columns are sized for their content', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto(state.base);
   await expect(page.locator('#published tbody tr').first()).toBeVisible();
+
+  // Nothing short is broken across lines: states, addresses, link chips.
   const broken = await page.evaluate(() => {
     const out: string[] = [];
-    for (const td of document.querySelectorAll('#published td:nth-child(2), #published td:nth-child(3)')) {
-      const range = document.createRange();
-      range.selectNodeContents(td);
-      // One rectangle per line of text.
-      if (range.getClientRects().length > 1) out.push(td.textContent ?? '');
+    const lines = (el: Element) => { const r = document.createRange(); r.selectNodeContents(el); return r.getClientRects().length; };
+    for (const el of document.querySelectorAll('#published td.state, #published td.addr div, #published .link .dest, #published .link .proto')) {
+      if (lines(el) > 1) out.push(el.textContent ?? '');
     }
     return out;
   });
   expect(broken).toEqual([]);
+
+  // Each column has room for what it holds.
+  const widths = await page.locator('#published thead th').evaluateAll((ths) => ths.map((t) => t.getBoundingClientRect().width));
+  const [container, st, address, names, open] = widths;
+  expect(container).toBeGreaterThan(150);
+  expect(st).toBeGreaterThan(90);
+  expect(address).toBeGreaterThan(130);
+  expect(names).toBeGreaterThan(300);
+  expect(open).toBeGreaterThan(250);
+
+  // The page is not wider than the screen.
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(0);
+});
+
+test('the columns do not move when the content changes', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(state.base);
+  await expect(page.locator('#published tbody tr').first()).toBeVisible();
+  const measure = () => page.locator('#published thead th').evaluateAll((ths) => ths.map((t) => Math.round(t.getBoundingClientRect().width)));
+  const before = await measure();
+
+  try {
+    // A container with a very long name and a long list of ports.
+    run('x'.repeat(40) + '-long-name-for-the-layout', ['--expose', '8000', '--expose', '8001', '--expose', '8002'], 'busybox:latest', ['sleep', '600']);
+    await expect(page.locator('#published tbody tr', { hasText: 'long-name-for-the-layout' })).toHaveCount(1, { timeout: 20_000 });
+    expect(await measure()).toEqual(before);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(0);
+  } finally {
+    dockerQuiet('rm', '-f', PREFIX + 'x'.repeat(40) + '-long-name-for-the-layout');
+    // The removal reaches the page as one more update. Wait for it, or it
+    // lands in the middle of the next test and redraws the table under it.
+    await expect.poll(async () => (await snapshot()).records.some((r) => r.container.includes('long-name-for-the-layout')),
+      { timeout: 20_000 }).toBe(false);
+  }
 });
 
 test('on a narrow screen a row is a card and every value stays readable', async ({ page }) => {
@@ -249,15 +340,67 @@ test('on a narrow screen a row is a card and every value stays readable', async 
   await page.goto(state.base);
   const first = page.locator('#published tbody tr').first();
   await expect(first).toBeVisible();
-  // The column name is shown above the value.
-  const labels = await first.locator('td').evaluateAll((tds) => tds.map((td) => (td as HTMLElement).dataset.label));
-  expect(labels).toEqual(['Container', 'State', 'Address', 'Names', 'Open']);
-  // The names are not squeezed into a sliver.
+
+  // The head of the card: name and state on the same line.
+  const head = await first.evaluate((tr) => {
+    const c = tr.querySelector('td.container')!.getBoundingClientRect();
+    const s = tr.querySelector('td.state')!.getBoundingClientRect();
+    return { cTop: c.top, cBottom: c.bottom, cLeft: c.left, sTop: s.top, sBottom: s.bottom, sLeft: s.left };
+  });
+  // The state sits beside the name, within its height, and to its right.
+  expect(head.sTop).toBeGreaterThanOrEqual(head.cTop - 1);
+  expect(head.sBottom).toBeLessThanOrEqual(head.cBottom + 1);
+  expect(head.sLeft).toBeGreaterThan(head.cLeft);
+
+  // The other values are labelled with their column name.
+  const labels = await first.locator('td:not(.container):not(.state)').evaluateAll((tds) =>
+    tds.filter((td) => (td as HTMLElement).offsetParent !== null).map((td) => (td as HTMLElement).dataset.label));
+  expect(labels).toEqual(expect.arrayContaining(['Names']));
+  expect(labels.every((l) => ['Address', 'Addresses', 'Names', 'Open'].includes(l!))).toBe(true);
+
+  // The names are not squeezed into a sliver, and the card fits the screen.
   const width = await first.locator('td').nth(3).evaluate((td) => td.getBoundingClientRect().width);
   expect(width).toBeGreaterThan(250);
   const box = await first.boundingBox();
   expect(box!.width).toBeLessThanOrEqual(390);
 });
+
+test('on a narrow screen a container with nothing to open has no empty heading', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 800 });
+  await page.goto(state.base);
+  await expect(page.locator('#published tbody tr').first()).toBeVisible();
+  // pw-db and pw-udp have only non-web ports, so their Open cell holds text;
+  // a published container with no ports at all has none. The empty ones must
+  // not be shown.
+  const emptyShown = await page.locator('#published td.links:empty').evaluateAll((tds) =>
+    tds.filter((td) => (td as HTMLElement).offsetParent !== null).length);
+  expect(emptyShown).toBe(0);
+});
+
+for (const width of [320, 360, 414, 768]) {
+  test(`at ${width}px nothing overflows and the chips are easy to tap`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 800 });
+    await page.goto(state.base);
+    await expect(page.locator('#published tbody tr').first()).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(0);
+
+    const heights = await page.locator('#published a.link').evaluateAll((els) => els.map((e) => e.getBoundingClientRect().height));
+    expect(heights.length).toBeGreaterThan(5);
+    for (const h of heights) expect(h).toBeGreaterThanOrEqual(30);
+
+    // A chip never runs off the card that holds it.
+    const out = await page.evaluate(() => {
+      const bad: string[] = [];
+      for (const a of document.querySelectorAll('#published a.link')) {
+        const r = a.getBoundingClientRect();
+        const card = a.closest('tr')!.getBoundingClientRect();
+        if (r.right > card.right + 1 || r.left < card.left - 1) bad.push(a.textContent ?? '');
+      }
+      return bad;
+    });
+    expect(out).toEqual([]);
+  });
+}
 
 test('light and dark themes both render legibly', async ({ page }) => {
   const colours = async (scheme: 'light' | 'dark') => {

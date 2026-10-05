@@ -100,13 +100,26 @@ pubblicati, che si aggiorna da sola.
 
 ### I link di accesso
 
-L'ultima colonna, **Open**, elenca le porte raggiungibili attraverso quell'indirizzo,
-come link cliccabili che si aprono in una nuova scheda:
+La tabella ha **una riga per container**, con colonne di larghezza fissa
+(Container, Stato, Indirizzi, Nomi, Open) che non si spostano quando cambia il
+contenuto. Gli indirizzi **IPv6 non sono mostrati** nella pagina (restano nel
+file hosts e nell'API: `::1` per una porta pubblicata). Un indirizzo IPv6 compare
+solo se è l'unico modo di raggiungere qualcosa.
 
-| Riga | Link | Perché |
+L'ultima colonna, **Open**, ha **un solo link per porta**, con un tag che dice se
+è **TCP** o **UDP** (a parole, in colore diverso e con bordo pieno o tratteggiato,
+così non dipende dal solo colore):
+
+| Porta | Link | Perché |
 |---|---|---|
-| Indirizzo dell'host (`127.0.0.1`, o l'interfaccia scelta con `-p IP:…`) | `http://<nome>:<porta pubblicata>/` | È lo scopo del nome: `nginx.docker.local:8080` funziona come `localhost:8080` |
-| Indirizzo del container | `http://<indirizzo>:<porta del container>/` | Si usa l'**indirizzo** e non il nome, perché in modalità `both` il nome risolve prima sull'host, e un servizio dell'host sulla stessa porta risponderebbe al posto del container. Con `TARGET_MODE=container-ip` il nome risolve solo sul container e si usa il nome |
+| Pubblicata (`-p`) | `http://<nome>:<porta dell'host>/` | È lo scopo del nome: `nginx.docker.local:8080` funziona come `localhost:8080` |
+| Solo esposta (`--expose`, `EXPOSE`) | `http://<indirizzo del container>:<porta del container>/` | Si usa l'**indirizzo** e non il nome, perché in modalità `both` il nome risolve prima sull'host, e un servizio dell'host sulla stessa porta risponderebbe al posto del container. Con `TARGET_MODE=container-ip` il nome risolve solo sul container e si usa il nome |
+
+Una porta pubblicata e in ascolto nel container non è elencata due volte: vale il
+link pubblicato. Una porta legata sia a `0.0.0.0` sia a `::` ha un link solo.
+Sotto i 900 px la tabella diventa un elenco di **schede** (nome e stato in testa,
+poi ogni valore sotto il nome della colonna), con chip alti a sufficienza per il
+tocco; nessuna larghezza di schermo produce scorrimento orizzontale.
 
 Regole:
 
@@ -142,9 +155,15 @@ loopback.
 
 ## Requisiti
 
-- Linux con Docker Engine **25 o successivo** (API 1.44+). Il client effettua
+- Linux con Docker Engine **19.03 o successivo** (API 1.40+). Il client effettua
   la negoziazione automatica della versione, quindi le versioni più recenti
-  funzionano senza configurazione.
+  funzionano senza configurazione, e un daemon più vecchio dell'API 1.40 viene
+  rifiutato con un messaggio chiaro. L'agente usa solo elenco container, stream
+  di eventi e versione del motore. Il limite è verificato con richieste legate a
+  ciascuna versione API da 1.40 a 1.44 (`DOCKER_API_VERSION`) contro un daemon
+  reale: non è stato provato su un motore realmente così vecchio, perché la VM di
+  sviluppo ne ha uno recente. Su Docker precedente al 25 va quindi confermato in
+  produzione con `docker-hoster-injector run` e il log `connected to Docker`.
 - Funziona anche con **Docker rootless** impostando `DOCKER_HOST`.
 - Nessuna dipendenza Go oltre al solo client Docker ufficiale.
 
@@ -180,7 +199,7 @@ docker run -d --name docker-hoster-injector \
 L'agente deve poter riscrivere `/etc/hosts`. Esistono due strategie, con
 protezioni diverse.
 
-**Opzione A — mount del singolo file (minor privilegio, default)**
+**Opzione A — mount del singolo file (minor privilegio, default dell'immagine, `docker run`)**
 
 ```yaml
 volumes:
@@ -194,7 +213,7 @@ vecchio e poi ritagliato. `rename(2)` non è utilizzabile: su un bind mount
 restituisce `EBUSY`. Non si tronca mai prima di scrivere, quindi la finestra
 di incoerenza è di microsecondi e non può mai lasciare un file vuoto.
 
-**Opzione B — mount della directory (atomico)**
+**Opzione B — mount della directory (atomico, usata dal `docker-compose.yml`)**
 
 ```yaml
 volumes:
@@ -204,9 +223,13 @@ environment:
   HOSTS_MOUNT_MODE: dir
 ```
 
-Scrive un file temporaneo e lo rinomina: la modifica è **atomica**. Il prezzo
-è esporre `/etc` in scrittura al container. Da usare quando la priorità è
-l'atomicità assoluta e si accetta l'ampiezza del montaggio.
+Scrive un file temporaneo e lo rinomina: la modifica è **atomica** e, poiché il
+bind mount segue la directory e non l'inode, **continua a funzionare anche se
+qualcosa sull'host sostituisce `/etc/hosts` con un rename**. Il prezzo è esporre
+`/etc` in scrittura al container (l'agente crea e rimuove solo i propri file
+temporanei `.hosts-docker-hoster-injector-*`). Per questo il compose di esempio
+usa questa modalità: è la più robusta. L'opzione A resta valida dove si
+preferisce il minor privilegio e si accetta il limite sull'inode (vedi sotto).
 
 Entrambe le modalità sono coperte dall'intera suite di test, crash compresi.
 
@@ -365,7 +388,7 @@ docker restart docker-hoster-injector
 
 ### Comportamenti da conoscere
 
-- **Mount del singolo file (`file`) e inode.** Un bind mount segue l'inode, non il
+- **Mount del singolo file (`file`) e inode** (il compose di esempio non lo usa). Un bind mount segue l'inode, non il
   percorso: se qualcosa sull'host *sostituisce* `/etc/hosts` con un rename
   (alcuni editor, `sed -i`, certi tool di provisioning), il container continua a
   scrivere sul vecchio file e l'host non vede più i record. In quel caso
@@ -482,13 +505,13 @@ accettazione non basta a vedere uno stream che si chiude senza avvisare.
 | Scrittura | Idempotenza, preserva entry utente, entrambe le modalità, concorrenza, assenza di file temporanei, `flock` |
 | **Round trip** | Aggiungi + togli = byte originali (CRLF, righe vuote finali, senza `\n` finale, byte non UTF-8, riga da 6 MB), con **fuzzing**; nessun residuo dopo `END`; symlink e permessi preservati; pulizia dei temporanei |
 | **Ciclo di vita** | `internal/agent` con un Docker finto: arresto rimuove il blocco, riavvio dopo kill converge, panic, errore all'avvio, `clean` idempotente |
-| Link della web UI | Porta pubblicata, porta del container, IPv6, container-ip, porte non web e UDP, nome preferito, escape di `</script>` |
+| Link della web UI | Una porta un link (pubblicata → nome:porta host, esposta → indirizzo:porta container), IPv6 nascosto, container-ip, porte non web e UDP, nome preferito, escape di `</script>` |
 | **Crash** | `SIGKILL` reale durante le scritture, 15 round per modalità, recovery da ogni forma di danno |
 | Iniezione | Un nome con `\n` **non può** iniettare record nel file dell'host |
 | Accettazione | ~20 container reali, dalla creazione al `kill -9`, con verifica HTTP reale |
 | **Uscite** | Processo vero: `SIGTERM`/`SIGINT`/`SIGHUP` in entrambe le modalità, segnali ripetuti, `kill -9` + riavvio, `clean`, Docker irraggiungibile, permessi del file |
 | **Immagine** | `docker stop` restituisce il file all'operatore (bind mount di file e di directory), `docker kill` + `clean`/riavvio, `HEALTHCHECK` healthy |
-| **Browser** | Playwright: tabella = API = file hosts, link cliccabili e funzionanti, filtro, aggiornamenti dal vivo, polling, dati ostili, schermo stretto, tema scuro, tastiera, riconnessione |
+| **Browser** | Playwright: tabella = API = file hosts, niente IPv6, tag TCP/UDP, link cliccabili e funzionanti, colonne dimensionate, filtro, aggiornamenti dal vivo, polling, dati ostili, schede su schermo stretto (320–768 px), tema scuro, tastiera, riconnessione |
 
 ### I test di accettazione
 

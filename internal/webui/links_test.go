@@ -28,36 +28,83 @@ func urls(links []Link) []string {
 	return out
 }
 
-func TestLinksForHostAddressUseNameAndHostPort(t *testing.T) {
+// container builds the records of one container: host-side addresses first, as
+// the reconciler orders them in "both" mode, then its own addresses.
+func container(name string, ports []dockerclient.Port, host []string, own []string) []reconcile.Entry {
+	var out []reconcile.Entry
+	for _, a := range host {
+		out = append(out, entry(a, reconcile.SideHost, name, ports...))
+	}
+	for _, a := range own {
+		out = append(out, entry(a, reconcile.SideContainer, name, ports...))
+	}
+	return out
+}
+
+func allURLs(links [][]Link) [][]string {
+	out := make([][]string, len(links))
+	for i, l := range links {
+		out[i] = urls(l)
+	}
+	return out
+}
+
+func TestEachPortGetsOneLinkOnTheRecordItIsReachedThrough(t *testing.T) {
 	t.Parallel()
 	s := New(Config{DNSSuffix: "docker.local", TargetMode: "both"}, nil)
-	names := []string{"web.docker.local"}
 
-	e := entry("127.0.0.1", reconcile.SideHost, "web",
-		dockerclient.Port{HostPort: 8080, ContainerPort: 80, Protocol: "tcp"},
-		dockerclient.Port{HostIP: "127.0.0.1", HostPort: 9090, ContainerPort: 81, Protocol: "tcp"},
-		dockerclient.Port{HostIP: "192.168.1.5", HostPort: 7070, ContainerPort: 82, Protocol: "tcp"},
-		dockerclient.Port{ContainerPort: 83, Protocol: "tcp"}, // exposed only
-	)
-	got := urls(s.linksFor(e, names))
-	want := []string{"http://web.docker.local:8080/", "http://web.docker.local:9090/"}
+	ports := []dockerclient.Port{
+		// Published on every interface: Docker lists it for IPv4 and IPv6.
+		{HostIP: "0.0.0.0", HostPort: 8080, ContainerPort: 80, Protocol: "tcp"},
+		{HostIP: "::", HostPort: 8080, ContainerPort: 80, Protocol: "tcp"},
+		// Published on loopback only.
+		{HostIP: "127.0.0.1", HostPort: 9090, ContainerPort: 81, Protocol: "tcp"},
+		// Published on another interface: no record for it, so it falls back
+		// to the container's own address.
+		{HostIP: "192.168.1.5", HostPort: 7070, ContainerPort: 82, Protocol: "tcp"},
+		// Exposed only.
+		{ContainerPort: 83, Protocol: "tcp"},
+	}
+	entries := container("web", ports, []string{"127.0.0.1", "::1"}, []string{"172.17.0.2"})
+
+	got := allURLs(s.linksByEntry(entries, []string{"web.docker.local"}))
+	want := [][]string{
+		// 127.0.0.1: both published ports that listen here.
+		{"http://web.docker.local:8080/", "http://web.docker.local:9090/"},
+		// ::1: nothing, the IPv4 record already carries 8080.
+		{},
+		// The container's own address: the ports that are not published.
+		{"http://172.17.0.2:82/", "http://172.17.0.2:83/"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("links = %v\nwant    %v", got, want)
+	}
+}
+
+func TestAPublishedPortIsNotListedAgainOnTheContainerAddress(t *testing.T) {
+	t.Parallel()
+	s := New(Config{DNSSuffix: "docker.local", TargetMode: "both"}, nil)
+	ports := []dockerclient.Port{
+		{HostPort: 8080, ContainerPort: 80, Protocol: "tcp"},
+		{ContainerPort: 80, Protocol: "tcp"},
+	}
+	entries := container("web", ports, []string{"127.0.0.1"}, []string{"172.17.0.2"})
+	got := allURLs(s.linksByEntry(entries, []string{"web.docker.local"}))
+	want := [][]string{{"http://web.docker.local:8080/"}, {}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("links = %v, want %v", got, want)
 	}
 }
 
-func TestLinksForContainerAddressUseTheAddress(t *testing.T) {
+// Each network is a different way in, so each container address carries the
+// exposed ports.
+func TestEveryContainerAddressCarriesTheExposedPorts(t *testing.T) {
 	t.Parallel()
 	s := New(Config{DNSSuffix: "docker.local", TargetMode: "both"}, nil)
-	names := []string{"web.docker.local"}
-
-	e := entry("172.17.0.2", reconcile.SideContainer, "web",
-		dockerclient.Port{HostPort: 8080, ContainerPort: 80, Protocol: "tcp"},
-		dockerclient.Port{ContainerPort: 80, Protocol: "tcp"}, // same port listed again
-		dockerclient.Port{ContainerPort: 443, Protocol: "tcp"},
-	)
-	got := urls(s.linksFor(e, names))
-	want := []string{"http://172.17.0.2:80/", "https://172.17.0.2:443/"}
+	ports := []dockerclient.Port{{ContainerPort: 8082, Protocol: "tcp"}}
+	entries := container("twonets", ports, nil, []string{"172.17.0.6", "172.18.0.3"})
+	got := allURLs(s.linksByEntry(entries, []string{"twonets.docker.local"}))
+	want := [][]string{{"http://172.17.0.6:8082/"}, {"http://172.18.0.3:8082/"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("links = %v, want %v", got, want)
 	}
@@ -66,9 +113,9 @@ func TestLinksForContainerAddressUseTheAddress(t *testing.T) {
 func TestLinksInContainerIPModeUseTheName(t *testing.T) {
 	t.Parallel()
 	s := New(Config{DNSSuffix: "docker.local", TargetMode: "container-ip"}, nil)
-	e := entry("172.17.0.2", reconcile.SideContainer, "web", dockerclient.Port{ContainerPort: 80, Protocol: "tcp"})
-	got := urls(s.linksFor(e, []string{"web.docker.local"}))
-	if want := []string{"http://web.docker.local:80/"}; !reflect.DeepEqual(got, want) {
+	entries := container("web", []dockerclient.Port{{ContainerPort: 80, Protocol: "tcp"}}, nil, []string{"172.17.0.2"})
+	got := allURLs(s.linksByEntry(entries, []string{"web.docker.local"}))
+	if want := [][]string{{"http://web.docker.local:80/"}}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("links = %v, want %v", got, want)
 	}
 }
@@ -76,45 +123,56 @@ func TestLinksInContainerIPModeUseTheName(t *testing.T) {
 func TestLinksBracketIPv6(t *testing.T) {
 	t.Parallel()
 	s := New(Config{DNSSuffix: "docker.local", TargetMode: "both"}, nil)
-	e := entry("fd00::2", reconcile.SideContainer, "web", dockerclient.Port{ContainerPort: 8000, Protocol: "tcp"})
-	got := urls(s.linksFor(e, []string{"web.docker.local"}))
-	if want := []string{"http://[fd00::2]:8000/"}; !reflect.DeepEqual(got, want) {
+	entries := container("web", []dockerclient.Port{{ContainerPort: 8000, Protocol: "tcp"}}, nil, []string{"fd00::2"})
+	got := allURLs(s.linksByEntry(entries, []string{"web.docker.local"}))
+	if want := [][]string{{"http://[fd00::2]:8000/"}}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("links = %v, want %v", got, want)
 	}
 }
 
-// Ports that do not speak HTTP, and UDP, are listed but offered no URL.
+// Ports that do not speak HTTP, and UDP, are listed but offered no URL. The
+// protocol is judged by the port inside the container: a database published on
+// a high port is still not a web page.
 func TestLinksSkipNonWebPorts(t *testing.T) {
 	t.Parallel()
 	s := New(Config{DNSSuffix: "docker.local", TargetMode: "both"}, nil)
-	e := entry("172.17.0.2", reconcile.SideContainer, "db",
-		dockerclient.Port{ContainerPort: 5432, Protocol: "tcp"},
-		dockerclient.Port{ContainerPort: 53, Protocol: "udp"},
-		dockerclient.Port{ContainerPort: 8080, Protocol: "tcp"},
-	)
-	links := s.linksFor(e, []string{"db.docker.local"})
-	if len(links) != 3 {
-		t.Fatalf("links = %+v, want 3 entries", links)
+	ports := []dockerclient.Port{
+		{HostPort: 49153, ContainerPort: 5432, Protocol: "tcp"},
+		{HostPort: 49154, ContainerPort: 443, Protocol: "tcp"},
+		{ContainerPort: 53, Protocol: "udp"},
+		{ContainerPort: 8080, Protocol: "tcp"},
 	}
-	for _, l := range links {
-		switch l.Port {
-		case 8080:
-			if l.URL == "" {
-				t.Error("8080/tcp has no URL")
-			}
-		default:
-			if l.URL != "" {
-				t.Errorf("%d/%s has URL %q", l.Port, l.Protocol, l.URL)
-			}
-		}
+	entries := container("db", ports, []string{"127.0.0.1"}, []string{"172.17.0.2"})
+	links := s.linksByEntry(entries, []string{"db.docker.local"})
+
+	byPort := map[int]Link{}
+	for _, l := range append(append([]Link{}, links[0]...), links[1]...) {
+		byPort[l.Port] = l
+	}
+	if len(byPort) != 4 {
+		t.Fatalf("links = %+v, want 4 distinct ports", links)
+	}
+	if byPort[49153].URL != "" {
+		t.Errorf("a database port got a URL: %q", byPort[49153].URL)
+	}
+	if byPort[49154].URL != "https://db.docker.local:49154/" {
+		t.Errorf("a TLS service got %q", byPort[49154].URL)
+	}
+	if byPort[53].URL != "" || byPort[53].Protocol != "udp" {
+		t.Errorf("the udp port = %+v", byPort[53])
+	}
+	if byPort[8080].URL != "http://172.17.0.2:8080/" {
+		t.Errorf("the exposed port got %q", byPort[8080].URL)
 	}
 }
 
 func TestLinksAreNeverNull(t *testing.T) {
 	t.Parallel()
 	s := New(Config{DNSSuffix: "docker.local"}, nil)
-	if got := s.linksFor(entry("172.17.0.2", reconcile.SideContainer, "web"), nil); got == nil {
-		t.Fatal("linksFor returned nil, which marshals to null")
+	for _, l := range s.linksByEntry(container("web", nil, nil, []string{"172.17.0.2"}), nil) {
+		if l == nil {
+			t.Fatal("a record has nil links, which marshals to null")
+		}
 	}
 }
 
@@ -134,27 +192,6 @@ func TestPrimaryNamePrefersTheContainersOwnNameWithoutUnderscore(t *testing.T) {
 		if got := primaryName(c.container, c.names, "docker.local"); got != c.want {
 			t.Errorf("primaryName(%q, %v) = %q, want %q", c.container, c.names, got, c.want)
 		}
-	}
-}
-
-// The protocol is decided by the port inside the container: a database
-// published on a high port is still not a web page.
-func TestLinksJudgeTheServiceByTheContainerPort(t *testing.T) {
-	t.Parallel()
-	s := New(Config{DNSSuffix: "docker.local", TargetMode: "both"}, nil)
-	e := entry("127.0.0.1", reconcile.SideHost, "db",
-		dockerclient.Port{HostPort: 49153, ContainerPort: 5432, Protocol: "tcp"},
-		dockerclient.Port{HostPort: 49154, ContainerPort: 443, Protocol: "tcp"},
-	)
-	links := s.linksFor(e, []string{"db.docker.local"})
-	if len(links) != 2 {
-		t.Fatalf("links = %+v", links)
-	}
-	if links[0].URL != "" {
-		t.Errorf("a database port got a URL: %q", links[0].URL)
-	}
-	if links[1].URL != "https://db.docker.local:49154/" {
-		t.Errorf("a TLS service got %q", links[1].URL)
 	}
 }
 
@@ -184,5 +221,79 @@ func TestSnapshotCannotBreakOutOfTheScriptElement(t *testing.T) {
 	}
 	if strings.Contains(page, "<script>alert(1)") {
 		t.Error("the hostile script is in the page unescaped")
+	}
+}
+
+func resultOf(entries ...reconcile.Entry) reconcile.Result {
+	for i := range entries {
+		entries[i].ContainerID = entries[i].ContainerName + "-id"
+		entries[i].State = "running"
+		entries[i].Names = []string{entries[i].ContainerName + ".docker.local"}
+	}
+	return reconcile.Result{Entries: entries}
+}
+
+func addresses(snap Snapshot) []string {
+	var out []string
+	for _, r := range snap.Records {
+		out = append(out, r.Address)
+	}
+	return out
+}
+
+// The page lists IPv4 only; the hosts file keeps both.
+func TestTheSnapshotHidesTheIPv6TwinOfARecord(t *testing.T) {
+	t.Parallel()
+	s := New(Config{DNSSuffix: "docker.local", TargetMode: "both"}, nil)
+	web := []dockerclient.Port{{HostIP: "0.0.0.0", HostPort: 8080, ContainerPort: 80, Protocol: "tcp"}, {HostIP: "::", HostPort: 8080, ContainerPort: 80, Protocol: "tcp"}}
+
+	snap := s.buildSnapshot(resultOf(container("web", web, []string{"127.0.0.1", "::1"}, []string{"172.17.0.2", "fd00::2"})...))
+	if got, want := addresses(snap), []string{"127.0.0.1", "172.17.0.2"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("addresses = %v, want %v", got, want)
+	}
+	if snap.Summary.Records != 2 || snap.Summary.Containers != 1 {
+		t.Errorf("summary = %+v", snap.Summary)
+	}
+	if !reflect.DeepEqual(urls(snap.Records[0].Links), []string{"http://web.docker.local:8080/"}) {
+		t.Errorf("links = %+v", snap.Records[0].Links)
+	}
+}
+
+// A container that can only be reached over IPv6 must not vanish from the page.
+func TestAnIPv6OnlyContainerIsStillListed(t *testing.T) {
+	t.Parallel()
+	s := New(Config{DNSSuffix: "docker.local", TargetMode: "both"}, nil)
+	snap := s.buildSnapshot(resultOf(container("v6", nil, nil, []string{"fd00::9"})...))
+	if got, want := addresses(snap), []string{"fd00::9"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("addresses = %v, want %v", got, want)
+	}
+}
+
+// A published port that only listens on IPv6 keeps the IPv6 record that carries
+// its link.
+func TestAnIPv6RecordThatCarriesALinkIsKept(t *testing.T) {
+	t.Parallel()
+	s := New(Config{DNSSuffix: "docker.local", TargetMode: "both"}, nil)
+	ports := []dockerclient.Port{{HostIP: "::", HostPort: 8080, ContainerPort: 80, Protocol: "tcp"}}
+	snap := s.buildSnapshot(resultOf(container("v6web", ports, []string{"::1"}, []string{"172.17.0.2"})...))
+	if got, want := addresses(snap), []string{"::1", "172.17.0.2"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("addresses = %v, want %v", got, want)
+	}
+}
+
+// The order Docker lists the ports in must not change which record carries the
+// link.
+func TestTheLinkOfAPortBoundBothWaysDoesNotDependOnTheListOrder(t *testing.T) {
+	t.Parallel()
+	s := New(Config{DNSSuffix: "docker.local", TargetMode: "both"}, nil)
+	v4 := dockerclient.Port{HostIP: "0.0.0.0", HostPort: 8080, ContainerPort: 80, Protocol: "tcp"}
+	v6 := dockerclient.Port{HostIP: "::", HostPort: 8080, ContainerPort: 80, Protocol: "tcp"}
+	for _, ports := range [][]dockerclient.Port{{v4, v6}, {v6, v4}} {
+		entries := container("web", ports, []string{"127.0.0.1", "::1"}, nil)
+		got := allURLs(s.linksByEntry(entries, []string{"web.docker.local"}))
+		want := [][]string{{"http://web.docker.local:8080/"}, {}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("order %v: links = %v, want %v", ports, got, want)
+		}
 	}
 }

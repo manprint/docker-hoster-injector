@@ -15,6 +15,10 @@
   --warn: #b45309;
   --bad: #b91c1c;
   --flash: #fff3c4;
+  --tcp: #1d4ed8;
+  --tcp-bg: #e0e9ff;
+  --udp: #9a3412;
+  --udp-bg: #ffe6d5;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -29,6 +33,10 @@
     --warn: #fbbf24;
     --bad: #f87171;
     --flash: #423c1a;
+    --tcp: #93c5fd;
+    --tcp-bg: #1e2f55;
+    --udp: #fdba74;
+    --udp-bg: #4a2a14;
   }
 }
 
@@ -91,8 +99,20 @@ table {
   width: 100%;
   margin: 0 0 1.75rem;
   border-collapse: collapse;
+  /* Fixed: the column widths below are what is used, not whatever the content
+     of the first rows happens to ask for. Without it the widths change with
+     every update and the page jumps. */
+  table-layout: fixed;
   font-variant-numeric: tabular-nums;
 }
+
+/* Widths of the columns. The names take what is left. */
+.c-container { width: 17%; }
+.c-state     { width: 6.5rem; }
+.c-address   { width: 9.5rem; }
+.c-open      { width: 30%; }
+.s-container { width: 30%; }
+.s-state     { width: 8rem; }
 
 caption {
   padding-bottom: .4rem;
@@ -159,40 +179,94 @@ footer {
 }
 
 /* Access links: one chip per reachable port. */
-td.links { white-space: normal; }
 .link {
-  display: inline-block;
-  margin: 0 .35rem .25rem 0;
-  padding: .1rem .5rem;
+  /* Flex: the destination may wrap when it is too long for the column, but the
+     protocol tag never drops to a line of its own. */
+  display: inline-flex;
+  align-items: baseline;
+  max-width: 100%;
+  margin: 0 .35rem .3rem 0;
+  padding: .1rem .55rem;
   border: 1px solid var(--line);
   border-radius: 999px;
   font: .85em ui-monospace, SFMono-Regular, Menlo, monospace;
   overflow-wrap: anywhere;
   text-decoration: none;
 }
-a.link { color: var(--accent); }
-a.link:hover, a.link:focus-visible { text-decoration: underline; }
-span.noweb { opacity: .6; cursor: default; }
+a.link { color: var(--accent); border-color: currentColor; }
+a.link:hover { background: var(--head); text-decoration: underline; }
+a.link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+span.noweb { color: var(--muted); cursor: default; }
 
-/* Narrow screens: a row becomes a card, with the column name above each value.
-   A table of five columns cannot be read at 390px however it wraps. */
-@media (max-width: 640px) {
+/* The protocol of a port, as a tag at the end of its chip. TCP and UDP differ
+   in the word, in the colour and in the shape (solid or dashed outline), so
+   they stay apart without relying on colour alone. */
+.proto {
+  flex: none;
+  margin-left: .45rem;
+  padding: 0 .35rem;
+  border-radius: .25rem;
+  font-size: .7rem;
+  font-weight: 700;
+  letter-spacing: .05em;
+  vertical-align: 1px;
+}
+.dest { min-width: 0; overflow-wrap: anywhere; }
+.proto-tcp { background: var(--tcp-bg); color: var(--tcp); }
+.proto-udp { background: var(--udp-bg); color: var(--udp); }
+.link[data-proto="udp"] { border-style: dashed; }
+
+td.container { font-weight: 600; }
+td.addr div { white-space: nowrap; }
+
+/* Below this width five columns cannot be read however they wrap, so a row
+   becomes a card: the container and its state on top, then each value under its
+   column name. */
+@media (max-width: 900px) {
   table, tbody, caption { display: block; }
-  thead { position: absolute; left: -9999px; }
+  colgroup, thead { display: none; }
+
   tr {
-    display: block;
-    margin: 0 0 .6rem;
-    padding: .3rem 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: .75rem;
+    margin: 0 0 .7rem;
+    padding: .55rem .8rem .35rem;
     border: 1px solid var(--line);
-    border-radius: .5rem;
+    border-radius: .6rem;
+    background: var(--bg);
   }
-  td { display: block; padding: .2rem .7rem; border: 0; }
+  tbody tr:hover { background: var(--bg); }
+
+  td { grid-column: 1 / -1; padding: .25rem 0; border: 0; min-width: 0; }
   td::before {
     content: attr(data-label);
     display: block;
     color: var(--muted);
-    font-size: .7rem;
-    letter-spacing: .05em;
+    font-size: .68rem;
+    letter-spacing: .06em;
     text-transform: uppercase;
   }
+
+  /* The head of the card: name and state on one line, no labels. */
+  td.container { grid-column: 1; font-size: 1.05rem; overflow-wrap: anywhere; }
+  td.state     { grid-column: 2; align-self: center; text-align: right; }
+  td.container::before, td.state::before { content: none; }
+
+  /* Skipped containers: the reason reads as a sentence under the head. */
+  #skipped td.reason::before { content: none; }
+
+  td.addr div { white-space: normal; }
+
+  /* A container with nothing to open has no empty "Open" heading in its card. */
+  td.links:empty { display: none; }
+
+  /* Touch targets: a chip is a finger-sized button here. */
+  .link { margin: 0 .4rem .45rem 0; padding: .5rem .8rem; }
+}
+
+@media (max-width: 480px) {
+  body { padding: 1rem .75rem 2.5rem; }
+  .filters input { width: 100%; }
+  footer { flex-direction: column; gap: .25rem; }
 }

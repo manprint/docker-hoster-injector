@@ -63,6 +63,16 @@ func (s apiSnapshot) recordsOf(container string) []apiRecord {
 	return out
 }
 
+func urls(links []apiLink) []string {
+	out := []string{}
+	for _, l := range links {
+		if l.URL != "" {
+			out = append(out, l.URL)
+		}
+	}
+	return out
+}
+
 const httpdCmd = "echo ok > /tmp/index.html && exec httpd -f -p %d -h /tmp"
 
 // extra is a container created by a test on top of the shared estate.
@@ -148,7 +158,7 @@ func TestWebUIMatchesTheHostsFileAndOffersWorkingLinks(t *testing.T) {
 		provision(t, extra{
 			name:    n,
 			network: testNetwork,
-			args:    []string{"--network-alias", "contested"},
+			args:    []string{"--network-alias", "contested", "--expose", "8080"},
 			cmd:     []string{"sh", "-c", fmt.Sprintf(httpdCmd, 8080)},
 		})
 	}
@@ -221,28 +231,52 @@ func TestWebUIMatchesTheHostsFileAndOffersWorkingLinks(t *testing.T) {
 	})
 
 	t.Run("a container on two networks has one container address per network", func(t *testing.T) {
-		// Docker reports a published port once for IPv4 and once for IPv6, so
-		// the host side is 127.0.0.1 and ::1: both are the host.
+		// The published port is linked once, on the host record, with the name
+		// and the host port. It is not listed again on the container addresses.
 		var container, host int
+		var published []string
 		for _, r := range snap.recordsOf("dhi-x-multinet") {
+			if strings.Contains(r.Address, ":") {
+				t.Errorf("an IPv6 address is listed: %s", r.Address)
+			}
 			switch r.Side {
 			case "container":
 				container++
-				var ok bool
-				for _, l := range r.Links {
-					if l.URL == fmt.Sprintf("http://%s:8080/", r.Address) {
-						ok = true
-					}
-				}
-				if !ok {
-					t.Errorf("container address %s has no link to its own port: %+v", r.Address, r.Links)
+				if len(r.Links) != 0 {
+					t.Errorf("container address %s repeats a published port: %+v", r.Address, r.Links)
 				}
 			case "host":
 				host++
+				published = append(published, urls(r.Links)...)
 			}
 		}
-		if container != 2 || host < 1 {
-			t.Errorf("container-side=%d host-side=%d, want 2 and at least 1", container, host)
+		if container != 2 || host != 1 {
+			t.Errorf("container-side=%d host-side=%d, want 2 and 1", container, host)
+		}
+		if want := fmt.Sprintf("http://dhi-x-multinet.docker.local:%d/", multiPort); len(published) != 1 || published[0] != want {
+			t.Errorf("host links = %v, want [%s]", published, want)
+		}
+	})
+
+	t.Run("an exposed port that is not published is linked on the container address", func(t *testing.T) {
+		var found bool
+		for _, r := range snap.recordsOf("dhi-x-conflict-a") {
+			for _, l := range r.Links {
+				if l.URL == fmt.Sprintf("http://%s:8080/", r.Address) {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Errorf("no link to the container address: %+v", snap.recordsOf("dhi-x-conflict-a"))
+		}
+	})
+
+	t.Run("the page lists no IPv6 address", func(t *testing.T) {
+		for _, r := range snap.Records {
+			if strings.Contains(r.Address, ":") {
+				t.Errorf("%s lists %s", r.Container, r.Address)
+			}
 		}
 	})
 
@@ -366,6 +400,10 @@ func TestWebUIMatchesTheHostsFileAndOffersWorkingLinks(t *testing.T) {
 func sameAsFile(snap apiSnapshot, file []record) string {
 	want := map[string]map[string]bool{}
 	for _, r := range file {
+		// The page lists IPv4 only; the file has the IPv6 twins as well.
+		if strings.Contains(r.Addr, ":") {
+			continue
+		}
 		if want[r.Addr] == nil {
 			want[r.Addr] = map[string]bool{}
 		}
@@ -375,6 +413,9 @@ func sameAsFile(snap apiSnapshot, file []record) string {
 	}
 	got := map[string]map[string]bool{}
 	for _, r := range snap.Records {
+		if strings.Contains(r.Address, ":") {
+			continue
+		}
 		if got[r.Address] == nil {
 			got[r.Address] = map[string]bool{}
 		}

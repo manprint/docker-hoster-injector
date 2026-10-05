@@ -340,7 +340,7 @@ func TestWebUIPageIsSelfContained(t *testing.T) {
 	}
 
 	// The state must be embedded so the table is populated on first paint.
-	for _, want := range []string{"docker.local", "docker-hoster-injector", "snapshot", "Published records"} {
+	for _, want := range []string{"docker.local", "docker-hoster-injector", "snapshot", "Published containers"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the page does not contain %q", want)
 		}
