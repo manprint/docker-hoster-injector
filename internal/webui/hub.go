@@ -51,14 +51,13 @@ func (h *hub) publish(snap Snapshot) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	for id, ch := range h.subscribers {
+	for _, ch := range h.subscribers {
 		select {
 		case ch <- snap:
 		default:
 			// The client is behind. Dropping is the right call: a monitoring
 			// page that lags is fine, an agent that blocks on a browser is not.
 			// The subscription stays open and will receive the next update.
-			_ = id
 		}
 	}
 }
@@ -68,4 +67,16 @@ func (h *hub) count() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.subscribers)
+}
+
+// closeAll ends every subscription, which is what makes the event stream
+// handlers return during a shutdown.
+func (h *hub) closeAll() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	for id, ch := range h.subscribers {
+		delete(h.subscribers, id)
+		close(ch)
+	}
 }

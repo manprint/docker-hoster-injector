@@ -57,7 +57,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	status := http.StatusOK
 
 	if stats != nil {
-		writes, lastErr, lastApply := stats()
+		writes, lastApply, lastErr := stats()
 		body["writes"] = writes
 		if !lastApply.IsZero() {
 			body["last_apply"] = lastApply.UTC().Format(time.RFC3339)

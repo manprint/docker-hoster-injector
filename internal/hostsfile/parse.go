@@ -68,6 +68,11 @@ type File struct {
 	// That is a crash artefact, and the caller is told to rebuild the block
 	// rather than trust it.
 	BlockTruncated bool
+	// Orphans holds every line that followed an unterminated BeginMarker. They
+	// cannot be told apart from the operator's own lines by position alone, so
+	// the caller decides which ones are ours (see Writer.SetOwnedSuffix) and
+	// keeps the rest. Empty unless BlockTruncated.
+	Orphans []Line
 }
 
 // Parse reads a hosts file.
@@ -107,6 +112,8 @@ func Parse(r io.Reader) (*File, error) {
 			if e, ok := parseEntry(raw); ok {
 				f.Managed = append(f.Managed, e)
 			}
+			// Remembered in case the block turns out to have no end.
+			f.Orphans = append(f.Orphans, newLine(raw))
 			continue
 		}
 
@@ -117,6 +124,8 @@ func Parse(r io.Reader) (*File, error) {
 	}
 	if inBlock {
 		f.BlockTruncated = true
+	} else {
+		f.Orphans = nil
 	}
 	return f, nil
 }

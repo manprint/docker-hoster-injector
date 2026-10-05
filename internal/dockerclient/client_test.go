@@ -1,11 +1,18 @@
 package dockerclient
 
 import (
+	"context"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/client"
 )
 
 func TestConvertExtractsNameWithoutSlash(t *testing.T) {
@@ -238,5 +245,154 @@ func TestPortPublished(t *testing.T) {
 	// that: -1 would be a bug in the converter, not a published port.
 	if (Port{HostPort: -1}).Published() {
 		t.Error("a negative port must not report as published")
+	}
+}
+
+// newTestClient returns a Client talking to a fake daemon.
+func newTestClient(t *testing.T, h http.Handler) *Client {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	api, err := client.New(
+		client.WithHost("tcp://"+strings.TrimPrefix(srv.URL, "http://")),
+		client.WithAPIVersion("1.51"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = api.Close() })
+	return &Client{api: api, log: slog.New(slog.DiscardHandler)}
+}
+
+// The daemon delivers one event and then drops the connection, which is what
+// "systemctl restart docker" looks like from here. Docker's own client never
+// closes its message channel, so the end of the stream has to be detected from
+// the error channel. If it is not, the watcher waits forever and never
+// reconnects.
+func TestEventsReportsTheEndOfTheStream(t *testing.T) {
+	t.Parallel()
+
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"Type":"container","Action":"start","Actor":{"ID":"abc","Attributes":{"name":"web"}}}` + "\n"))
+		w.(http.Flusher).Flush()
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	events, _, err := c.Events(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.After(3 * time.Second)
+	var got []Event
+	for {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				if len(got) != 1 || got[0].Action != "start" || got[0].ContainerName != "web" {
+					t.Fatalf("events = %+v, want the single start event for web", got)
+				}
+				return
+			}
+			got = append(got, ev)
+		case <-deadline:
+			t.Fatal("the stream ended but the event channel was never closed")
+		}
+	}
+}
+
+func TestEventsStopsOnContextCancel(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer close(release)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	events, _, err := c.Events(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+
+	select {
+	case _, ok := <-events:
+		if ok {
+			t.Fatal("unexpected event")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the event channel stayed open after the context was cancelled")
+	}
+}
+
+func TestConvertReadsTheGlobalIPv6Address(t *testing.T) {
+	t.Parallel()
+
+	got := convert(container.Summary{
+		NetworkSettings: &container.NetworkSettingsSummary{
+			Networks: map[string]*network.EndpointSettings{
+				"dual": {
+					IPAddress:         netip.MustParseAddr("172.20.0.2"),
+					GlobalIPv6Address: netip.MustParseAddr("fd00:1::2"),
+				},
+			},
+		},
+	})
+	n := got.Networks[0]
+	if n.IPv4 != "172.20.0.2" || n.IPv6 != "fd00:1::2" {
+		t.Errorf("addresses = %q / %q, want 172.20.0.2 / fd00:1::2", n.IPv4, n.IPv6)
+	}
+}
+
+// An alias set on one network must not leak onto the others.
+func TestAliasesStayOnTheirOwnNetwork(t *testing.T) {
+	t.Parallel()
+
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/containers/abc/json") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"Id":"abc","NetworkSettings":{"Networks":{
+			"front":{"Aliases":["web"],"DNSNames":["web","abc"]},
+			"back":{"Aliases":["db"]}}}}`))
+	}))
+
+	cs := []Container{{
+		ID: "abc",
+		Networks: []Network{
+			{Name: "back"},
+			{Name: "front"},
+			{Name: "unrelated"},
+		},
+	}}
+	c.fillAliases(context.Background(), cs)
+
+	byName := map[string][]string{}
+	for _, n := range cs[0].Networks {
+		byName[n.Name] = n.Aliases
+	}
+	if got := byName["front"]; len(got) != 2 {
+		t.Errorf("front aliases = %v, want web and abc, deduplicated", got)
+	}
+	if got := byName["back"]; len(got) != 1 || got[0] != "db" {
+		t.Errorf("back aliases = %v, want [db]", got)
+	}
+	if got := byName["unrelated"]; len(got) != 0 {
+		t.Errorf("unrelated aliases = %v, want none", got)
 	}
 }

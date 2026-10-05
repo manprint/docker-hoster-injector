@@ -102,6 +102,7 @@ caption {
 }
 
 th, td {
+  overflow-wrap: anywhere;
   padding: .4rem .6rem;
   border-bottom: 1px solid var(--line);
   text-align: left;
@@ -115,6 +116,9 @@ tbody tr:hover { background: var(--head); }
 
 .name {
   display: inline-block;
+  max-width: 100%;
+  /* A long name must wrap inside its cell instead of widening the page. */
+  overflow-wrap: anywhere;
   margin: 0 .3rem .2rem 0;
   padding: .05rem .35rem;
   border: 1px solid var(--line);

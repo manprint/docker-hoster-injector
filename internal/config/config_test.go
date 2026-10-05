@@ -18,18 +18,6 @@ func env(pairs map[string]string) LookupFunc {
 	}
 }
 
-// merge copies base and overlays overrides.
-func merge(base, over map[string]string) map[string]string {
-	out := make(map[string]string, len(base)+len(over))
-	for k, v := range base {
-		out[k] = v
-	}
-	for k, v := range over {
-		out[k] = v
-	}
-	return out
-}
-
 func TestLoadFromDefaults(t *testing.T) {
 	t.Parallel()
 

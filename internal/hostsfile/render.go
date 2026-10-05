@@ -6,6 +6,13 @@ import (
 	"strings"
 )
 
+// headerLines are the comments written right after the BeginMarker. They are
+// kept in one place so that recovery can recognise them as its own.
+var headerLines = [...]string{
+	"# Generated automatically. Edits are overwritten on the next",
+	"# container lifecycle event. Safe to delete: it is rebuilt.",
+}
+
 // Render produces the complete file text: the user part verbatim, followed by
 // the managed block.
 //
@@ -30,8 +37,10 @@ func Render(f *File, managed []Entry) []byte {
 	if len(managed) > 0 {
 		buf.WriteString(BeginMarker)
 		buf.WriteByte('\n')
-		buf.WriteString("# Generated automatically. Edits are overwritten on the next\n")
-		buf.WriteString("# container lifecycle event. Safe to delete: it is rebuilt.\n")
+		for _, h := range headerLines {
+			buf.WriteString(h)
+			buf.WriteByte('\n')
+		}
 		for _, e := range GroupByAddr(managed) {
 			// GroupByAddr drops entries with nothing writable, so an empty
 			// result here would be a bug rather than a case to guard.

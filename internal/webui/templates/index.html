@@ -14,17 +14,18 @@
     <code>{{.Config.HostsFile}}</code> &middot;
     target <code>{{.Config.TargetMode}}</code> &middot;
     mount <code>{{.Config.MountMode}}</code> &middot;
-    v{{.Config.Version}}
+    <span title="agent version">{{.Config.Version}}</span>
   </p>
   <p class="stat">
     <span class="pill"><b>{{.Snapshot.Summary.Containers}}</b> containers</span>
     <span class="pill"><b>{{.Snapshot.Summary.Records}}</b> records</span>
     <span class="pill"><b>{{.Snapshot.Summary.Names}}</b> names</span>
     <span class="pill"><b>{{.Snapshot.Summary.Skipped}}</b> skipped</span>
-    <span id="state" class="pill waiting">connecting…</span>
+    <span id="state" class="pill waiting" role="status">connecting…</span>
   </p>
   <p class="filters">
     <input id="filter" type="search" placeholder="filter by container, name or address"
+           aria-label="Filter by container, name or address"
            autocomplete="off" spellcheck="false">
   </p>
 </header>
@@ -56,6 +57,8 @@
 
 <script>
 const SNAPSHOT = {{.SnapshotJSON}};
+const EVENTS = {{if .Config.DisableEvents}}false{{else}}true{{end}};
+const POLL_MS = 5000;
 
 // The table is rebuilt from a complete snapshot on every event, which is what
 // lets the page survive a disconnect without any client-side state machine.
@@ -112,10 +115,18 @@ function cell(tr, text, cls) {
 }
 
 function header(snap) {
-  document.querySelectorAll('.stat .pill')[0].innerHTML = '<b>' + snap.summary.containers + '</b> containers';
-  document.querySelectorAll('.stat .pill')[1].innerHTML = '<b>' + snap.summary.records + '</b> records';
-  document.querySelectorAll('.stat .pill')[2].innerHTML = '<b>' + snap.summary.names + '</b> names';
-  document.querySelectorAll('.stat .pill')[3].innerHTML = '<b>' + snap.summary.skipped + '</b> skipped';
+  const pills = document.querySelectorAll('.stat .pill');
+  const counters = [
+    [snap.summary.containers, ' containers'],
+    [snap.summary.records, ' records'],
+    [snap.summary.names, ' names'],
+    [snap.summary.skipped, ' skipped'],
+  ];
+  counters.forEach(([value, label], i) => {
+    const b = document.createElement('b');
+    b.textContent = value;
+    pills[i].replaceChildren(b, label);
+  });
   document.getElementById('updated').textContent =
     'updated ' + new Date(snap.generated_at).toLocaleTimeString();
 }
@@ -144,12 +155,23 @@ function setState(kind, text) {
   el.textContent = text;
 }
 
+// current is the latest snapshot received, whichever way it arrived. The filter
+// re-renders from it, so it must follow every update: filtering from the
+// snapshot the page was loaded with would bring back data that is long gone.
+let current = SNAPSHOT;
+
+function accept(snap) {
+  current = snap;
+  render(current);
+}
+
+// Push: the agent sends a complete snapshot on every change.
 function connect() {
   const source = new EventSource('/api/events');
 
   source.addEventListener('snapshot', (ev) => {
     setState('live', 'live');
-    render(JSON.parse(ev.data));
+    accept(JSON.parse(ev.data));
   });
 
   source.onopen = () => setState('live', 'live');
@@ -159,10 +181,27 @@ function connect() {
   };
 }
 
+// Pull: used when the agent runs with WEB_EVENTS=false.
+async function poll() {
+  try {
+    const res = await fetch('/api/entries', { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    accept(await res.json());
+    setState('live', 'polling');
+  } catch (err) {
+    setState('down', 'unreachable');
+  }
+}
+
 document.getElementById('filter').addEventListener('input', () => render(current));
-let current = SNAPSHOT;
 render(current);
-connect();
+
+if (EVENTS) {
+  connect();
+} else {
+  poll();
+  setInterval(poll, POLL_MS);
+}
 </script>
 </body>
 </html>

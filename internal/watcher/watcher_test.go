@@ -226,7 +226,7 @@ func TestWatcherSurvivesStreamFailure(t *testing.T) {
 		return neverEvents()
 	}}
 
-	got := collectTriggers(t, api, Options{Resync: 40 * time.Millisecond}, 300*time.Millisecond)
+	got := collectTriggers(t, api, Options{Resync: 40 * time.Millisecond, MinBackoff: time.Millisecond}, 300*time.Millisecond)
 
 	// At least two reconnects, each followed by a reconcile.
 	reconnects := 0
@@ -360,4 +360,48 @@ func containsTrigger(all []Trigger, want Trigger) bool {
 		}
 	}
 	return false
+}
+
+// countingSource fails every stream immediately, the way a stopped daemon does
+// with Docker's client: the connection error arrives on the error channel.
+type countingSource struct {
+	mu    sync.Mutex
+	opens int
+}
+
+func (c *countingSource) Events(context.Context) (<-chan dockerclient.Event, <-chan error, error) {
+	c.mu.Lock()
+	c.opens++
+	c.mu.Unlock()
+
+	ev := make(chan dockerclient.Event)
+	errs := make(chan error, 1)
+	close(ev)
+	errs <- errors.New("connection refused")
+	close(errs)
+	return ev, errs, nil
+}
+
+func (c *countingSource) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.opens
+}
+
+// A daemon that is down must not be reconnected to in a tight loop.
+func TestWatcherBacksOffWhenStreamsKeepFailing(t *testing.T) {
+	t.Parallel()
+
+	src := &countingSource{}
+	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancel()
+
+	triggers := make(chan Trigger, 64)
+	New(src, Options{}).Run(ctx, triggers)
+	<-ctx.Done()
+
+	// 500ms, then 1s: at most the first attempt and one retry fit in 700ms.
+	if n := src.count(); n > 3 {
+		t.Errorf("the stream was opened %d times in 700ms, want the backoff to limit it to a few", n)
+	}
 }

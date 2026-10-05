@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +36,12 @@ const MinAPIVersion = "1.44"
 // of connections; too low and the resync gets slow. Eight is comfortable
 // either way.
 const maxInspectConcurrency = 8
+
+// callTimeout bounds one unary Docker API call (ping, list, inspect). Without
+// it a daemon that accepts the connection but never answers would block the
+// only goroutine that rewrites the hosts file. It deliberately does not apply
+// to the event stream, which is long lived by design.
+const callTimeout = 15 * time.Second
 
 // EngineInfo describes the daemon the agent is talking to.
 type EngineInfo struct {
@@ -140,6 +147,7 @@ type API interface {
 // Client is the real implementation backed by the Docker Engine API.
 type Client struct {
 	api client.APIClient
+	log *slog.Logger
 }
 
 // Compile-time proof that the real client satisfies the interface, so a
@@ -155,16 +163,17 @@ type Options struct {
 	APIVersion string
 	// Timeout bounds a single API call. Zero means the client default.
 	Timeout time.Duration
+	// Logger receives diagnostics such as a failed alias lookup. Nil discards
+	// them.
+	Logger *slog.Logger
 }
 
 // New builds a client and verifies the daemon is usable.
 func New(ctx context.Context, opts Options) (*Client, error) {
-	apiOpts := []client.Opt{
-		// Negotiation lets one binary work against Docker 25 through 29 and
-		// beyond: the client downgrades to whatever the daemon supports
-		// instead of failing on an unsupported version.
-		client.WithAPIVersionNegotiation(),
-	}
+	// Version negotiation is the client's default: one binary works against
+	// Docker 25 through 29 and beyond because the client downgrades to whatever
+	// the daemon supports. It is switched off only by pinning a version below.
+	var apiOpts []client.Opt
 	switch {
 	case opts.Host != "":
 		apiOpts = append(apiOpts, client.WithHost(opts.Host))
@@ -172,18 +181,22 @@ func New(ctx context.Context, opts Options) (*Client, error) {
 		apiOpts = append(apiOpts, client.WithHostFromEnv())
 	}
 	if opts.APIVersion != "" {
-		apiOpts = append(apiOpts, client.WithVersion(opts.APIVersion))
+		apiOpts = append(apiOpts, client.WithAPIVersion(opts.APIVersion))
 	}
 	if opts.Timeout > 0 {
 		apiOpts = append(apiOpts, client.WithTimeout(opts.Timeout))
 	}
 
-	api, err := client.NewClientWithOpts(apiOpts...)
+	api, err := client.New(apiOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("create the Docker client: %w", err)
 	}
 
-	c := &Client{api: api}
+	log := opts.Logger
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	c := &Client{api: api, log: log}
 	// Fail fast and loudly at startup rather than on the first event.
 	if _, err := c.Info(ctx); err != nil {
 		_ = api.Close()
@@ -194,6 +207,9 @@ func New(ctx context.Context, opts Options) (*Client, error) {
 
 // Info returns the engine version, having checked the API floor.
 func (c *Client) Info(ctx context.Context) (EngineInfo, error) {
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+
 	// Ping is used rather than ServerVersion because it does not depend on the
 	// negotiated version exposing every field, so it works against the oldest
 	// supported engine.
@@ -237,6 +253,9 @@ func (c *Client) Info(ctx context.Context) (EngineInfo, error) {
 // containers still costs a bounded number of concurrent round trips rather
 // than a serial chain.
 func (c *Client) ListRunning(ctx context.Context) ([]Container, error) {
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+
 	res, err := c.api.ContainerList(ctx, client.ContainerListOptions{
 		All:     true,
 		Filters: make(client.Filters).Add("status", "running"),
@@ -255,6 +274,9 @@ func (c *Client) ListRunning(ctx context.Context) ([]Container, error) {
 }
 
 // fillAliases populates each container's network aliases via inspect.
+//
+// Aliases are attached to the network they belong to: an alias set on one
+// network says nothing about the others.
 func (c *Client) fillAliases(ctx context.Context, containers []Container) {
 	if len(containers) == 0 {
 		return
@@ -279,15 +301,21 @@ func (c *Client) fillAliases(ctx context.Context, containers []Container) {
 				return
 			}
 
-			names, err := c.aliasesOf(ctx, containers[i].ID)
+			byNetwork, err := c.aliasesOf(ctx, containers[i].ID)
 			if err != nil {
 				// Not fatal: the container is still published under its own
 				// name, only the aliases are missing. Losing an alias is a
-				// smaller problem than losing the record entirely.
+				// smaller problem than losing the record entirely, but it is
+				// worth a warning because the symptom (a missing Compose
+				// service name) is otherwise hard to explain.
+				c.log.Warn("could not read the network aliases",
+					"container", shortID(containers[i].ID), "error", err)
 				return
 			}
 			for j := range containers[i].Networks {
-				containers[i].Networks[j].Aliases = names
+				if names, ok := byNetwork[containers[i].Networks[j].Name]; ok {
+					containers[i].Networks[j].Aliases = names
+				}
 			}
 		}(i)
 	}
@@ -295,9 +323,9 @@ func (c *Client) fillAliases(ctx context.Context, containers []Container) {
 	wg.Wait()
 }
 
-// aliasesOf returns the union of the aliases and DNS names across every
-// network endpoint of a container.
-func (c *Client) aliasesOf(ctx context.Context, id string) ([]string, error) {
+// aliasesOf returns, for each network endpoint of a container, the union of its
+// aliases and DNS names.
+func (c *Client) aliasesOf(ctx context.Context, id string) (map[string][]string, error) {
 	detail, err := c.api.ContainerInspect(ctx, id, client.ContainerInspectOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("inspect container %s: %w", shortID(id), err)
@@ -307,17 +335,17 @@ func (c *Client) aliasesOf(ctx context.Context, id string) ([]string, error) {
 		return nil, nil
 	}
 
-	var out []string
-	// Sorted iteration keeps the published records deterministic.
-	for _, name := range sortedKeys(networks.Networks) {
-		ep := networks.Networks[name]
+	out := make(map[string][]string, len(networks.Networks))
+	for name, ep := range networks.Networks {
 		if ep == nil {
 			continue
 		}
-		out = append(out, ep.Aliases...)
-		out = append(out, ep.DNSNames...)
+		var names []string
+		names = append(names, ep.Aliases...)
+		names = append(names, ep.DNSNames...)
+		out[name] = dedupeSorted(names)
 	}
-	return dedupeSorted(out), nil
+	return out, nil
 }
 
 // dedupeSorted removes duplicates while keeping the order, and drops blanks.
@@ -368,27 +396,43 @@ func (c *Client) Events(ctx context.Context) (<-chan Event, <-chan error, error)
 		defer close(out)
 		defer close(errOut)
 
-		for msg := range res.Messages {
+		messages := res.Messages
+		for {
 			select {
-			case out <- Event{
-				Type:          string(msg.Type),
-				Action:        string(msg.Action),
-				ContainerID:   msg.Actor.ID,
-				ContainerName: msg.Actor.Attributes["name"],
-			}:
 			case <-ctx.Done():
-				// The consumer stopped reading. Abandon the stream instead of
-				// blocking forever on a send nobody will receive.
 				return
-			}
-		}
 
-		// The message channel closing means the stream is over. Forward a
-		// non-nil error, if any, so the caller can log why; the Docker
-		// channels are receive-only, so it is relayed rather than passed on.
-		for err := range res.Err {
-			if err != nil {
-				errOut <- err
+			case msg, ok := <-messages:
+				if !ok {
+					// Docker's client never closes this channel today, but
+					// nothing in its contract forbids it. A nil channel blocks
+					// forever, so the loop keeps waiting for the error below
+					// instead of spinning on a closed one.
+					messages = nil
+					continue
+				}
+				select {
+				case out <- Event{
+					Type:          string(msg.Type),
+					Action:        string(msg.Action),
+					ContainerID:   msg.Actor.ID,
+					ContainerName: msg.Actor.Attributes["name"],
+				}:
+				case <-ctx.Done():
+					// The consumer stopped reading. Abandon the stream instead
+					// of blocking forever on a send nobody will receive.
+					return
+				}
+
+			case err, ok := <-res.Err:
+				// Docker reports the end of the stream, whatever the cause, on
+				// this channel and then closes it. It is the only reliable end
+				// of stream signal, because the message channel stays open.
+				// The error is relayed so the caller can log why; closing both
+				// output channels tells it to reconnect and reconcile.
+				if ok && err != nil {
+					errOut <- err
+				}
 				return
 			}
 		}
@@ -437,10 +481,16 @@ func convert(s container.Summary) Container {
 			if ep.IPAddress.IsValid() {
 				n.IPv4 = ep.IPAddress.String()
 			}
-			// EndpointSettings has no IPv6Address field; for an endpoint the
-			// dual stack address lives in IPAddress itself.
+			// The IPv6 address of a dual stack endpoint has its own field.
+			if ep.GlobalIPv6Address.IsValid() {
+				n.IPv6 = ep.GlobalIPv6Address.String()
+			}
+			// Defensive: an IPv6 address reported in IPAddress is still an IPv6
+			// address, while an IPv4-mapped one is IPv4 in disguise.
 			if addr := ep.IPAddress; addr.Is6() && !addr.Is4In6() {
-				n.IPv6 = addr.String()
+				if n.IPv6 == "" {
+					n.IPv6 = addr.String()
+				}
 				n.IPv4 = ""
 			}
 			c.Networks = append(c.Networks, n)

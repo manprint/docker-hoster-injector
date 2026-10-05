@@ -693,3 +693,30 @@ func contains(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+// In "both" mode the host-side address must be listed before the container's,
+// whatever the container's address looks like: the resolver tries them in file
+// order, and only the host side makes "name:8080" reach the published port.
+// "10.0.0.5" sorts before "127.0.0.1" as text, which is what used to break it.
+func TestBothModeListsTheHostSideAddressFirst(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{DNSSuffix: "docker.local", TargetMode: config.TargetModeBoth}
+	c := dockerclient.Container{
+		ID: "a1", Name: "nginx", State: "running", NetworkMode: "mynet",
+		Created:        time.Unix(1, 0),
+		Networks:       []dockerclient.Network{{Name: "mynet", IPv4: "10.0.0.5"}},
+		PublishedPorts: []dockerclient.Port{{HostPort: 8080, ContainerPort: 80, Protocol: "tcp"}},
+	}
+
+	res := New(cfg).Reconcile([]dockerclient.Container{c})
+	if len(res.Entries) != 2 {
+		t.Fatalf("got %d entries, want 2: %+v", len(res.Entries), res.Entries)
+	}
+	if got := res.Entries[0].IP.String(); got != "127.0.0.1" {
+		t.Errorf("first address = %s, want 127.0.0.1", got)
+	}
+	if got := res.Entries[1].IP.String(); got != "10.0.0.5" {
+		t.Errorf("second address = %s, want 10.0.0.5", got)
+	}
+}

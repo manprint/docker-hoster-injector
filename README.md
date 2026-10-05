@@ -22,6 +22,7 @@ per `nss-files`, presente ovunque.
 ## Indice
 
 - [Come funziona](#come-funziona)
+- [L'interfaccia di monitoraggio](#l-interfaccia-di-monitoraggio)
 - [Requisiti](#requisiti)
 - [Installazione](#installazione)
 - [Configurazione](#configurazione)
@@ -75,6 +76,33 @@ li provano in ordine: `nginx.docker.local:8080` risolve subito, e
 `nginx.docker.local:80` funziona comunque sul secondo indirizzo.
 
 ---
+
+## L'interfaccia di monitoraggio
+
+Su `http://127.0.0.1:8080` c'è una pagina con la tabella dei record
+pubblicati, che si aggiorna da sola.
+
+| Rotta | Contenuto |
+|---|---|
+| `GET /` | La pagina, con lo snapshot già incorporato: la tabella è popolata al primo rendering |
+| `GET /api/entries` | Lo stesso dato in JSON, per script e per il fallback |
+| `GET /api/config` | La configurazione della distribuzione |
+| `GET /api/events` | Stream SSE: ogni messaggio è uno snapshot completo |
+| `GET /healthz` | `503` se l'ultima applicazione è fallita |
+| `GET /metrics` | Contatori in formato Prometheus |
+
+Ogni messaggio SSE è uno **snapshot completo**, non un diff: il payload è
+piccolo e un client che si riconnette in qualsiasi momento è subito corretto,
+senza dover riprodurre una cronologia che potrebbe aver perso.
+
+La pagina è interamente autosufficiente: foglio di stile e logica sono
+incorporati, nessuna richiesta esterna. Serve perché il servizio gira spesso
+su reti isolate.
+
+**Non ha autenticazione**, come richiesto. È accettabile solo perché è
+**read-only**: qualsiasi metodo diverso da `GET` e `HEAD` riceve `405`, quindi
+non esiste una rotta che possa cambiare qualcosa. Va comunque legata a
+loopback.
 
 ## Requisiti
 
@@ -408,14 +436,17 @@ $ go test -tags=integration -v -run TestCrashDuringWrites ./test/integration/
 ```
 cmd/docker-hoster-injector/    main: segnali, lifecycle
 internal/
-  config/      da ambiente a configurazione validata
-  naming/      nomi Docker → nomi host, sanitizzazione, collisioni
-  hostsfile/   parsing, rendering, scrittura atomica, recovery
-  logging/     logger strutturato
-  dockerclient/ [fase 3]  client Docker, eventi, resync
-  reconcile/   [fase 4]  stato desiderato e diff
-  webui/       [fase 5b] interfaccia di monitoraggio
-test/integration/              test con crash reali
+  config/       da ambiente a configurazione validata
+  naming/       nomi Docker → nomi host, sanitizzazione, collisioni
+  hostsfile/    parsing, rendering, scrittura atomica, recovery
+  logging/      logger strutturato
+  version/      confronto numerico delle versioni API
+  dockerclient/ l'unico package che conosce i tipi del Docker Engine
+  watcher/      eventi + resync, con backoff
+  reconcile/    stato desiderato, regole di inclusione, collisioni
+  apply/        scrittura singola con debounce
+  webui/        pagina, API JSON, stream SSE, metriche
+test/integration/              acceptance test con crash reali
 ```
 
 Le dipendenze sono volutamente minime: solo il client Docker ufficiale, più
@@ -431,8 +462,20 @@ garanzia. Un nome non sicuro viene **scartato intero**, mai troncato: un nome
 troncato punterebbe silenziosamente a qualcos'altro.
 
 **Il sanitizzatore non può essere iniettivo** e i test lo documentano
-esplicitamente invece di nasconderlo, resorting a mostrare la proprietà che
-conta (ogni container mantiene un nome unico).
+esplicitamente invece di nasconderlo, mostrando la proprietà che conta: ogni
+container mantiene un nome proprio, e i nomi contesi sono assegnati in modo
+deterministico.
+
+**Gli alias di rete richiedono una richiesta per container.** Il Docker Engine
+restituisce `null` per `Aliases` e `DNSNames` in `/containers/json`: esistono
+solo in `/containers/{id}/json`. Leggerli dal primo endpoint significa pubblicare
+niente, e la funzionalità si rompe in silenzio. L'agente elenca i container e poi
+li ispeziona a concorrenza limitata.
+
+**Gli eventi dicono solo che qualcosa è successo, mai cosa.** Ogni trigger
+provoca una rilettura completa dello stato: trattare un evento come un fatto da
+applicare sarebbe un bug che si manifesta solo al rare eventi persi. Il resync
+periodico è la garanzia di correttezza, gli eventi sono solo latenza.
 
 ---
 

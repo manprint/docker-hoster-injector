@@ -25,7 +25,20 @@ import (
 const (
 	minBackoff = 500 * time.Millisecond
 	maxBackoff = 30 * time.Second
+
+	// stableStream is how long a stream must have lived before its end is
+	// treated as a fresh incident rather than a continuation of a failure. A
+	// refused connection ends within milliseconds, so without this a daemon
+	// that is down would be reconnected to in a tight loop.
+	stableStream = 10 * time.Second
 )
+
+// eventSource is the only part of the Docker client the watcher needs. It is
+// declared here, in the consuming package, so that the watcher can be tested
+// with a three line fake instead of the whole client surface.
+type eventSource interface {
+	Events(ctx context.Context) (<-chan dockerclient.Event, <-chan error, error)
+}
 
 // Trigger explains why a reconcile was requested.
 type Trigger string
@@ -44,12 +57,10 @@ const (
 
 // Watcher produces reconcile triggers.
 type Watcher struct {
-	api           dockerclient.API
-	resync        time.Duration
-	log           *slog.Logger
-	minResyncGap  time.Duration
-	mu            sync.Mutex
-	lastTriggerAt time.Time
+	api        eventSource
+	resync     time.Duration
+	log        *slog.Logger
+	minBackoff time.Duration
 }
 
 // Options configures a Watcher.
@@ -59,14 +70,22 @@ type Options struct {
 	Resync time.Duration
 	// Logger receives diagnostics. Nil discards them.
 	Logger *slog.Logger
+	// MinBackoff is the first delay before reconnecting a failed event stream.
+	// Zero means the default; tests set it low to avoid waiting.
+	MinBackoff time.Duration
 }
 
-// New returns a Watcher over the given API.
-func New(api dockerclient.API, opts Options) *Watcher {
+// New returns a Watcher over the given event source.
+func New(api eventSource, opts Options) *Watcher {
+	min := opts.MinBackoff
+	if min <= 0 {
+		min = minBackoff
+	}
 	return &Watcher{
-		api:    api,
-		resync: opts.Resync,
-		log:    opts.Logger,
+		api:        api,
+		resync:     opts.Resync,
+		log:        opts.Logger,
+		minBackoff: min,
 	}
 }
 
@@ -111,8 +130,13 @@ func (w *Watcher) Run(ctx context.Context, out chan<- Trigger) <-chan error {
 // A failure here is logged and retried rather than propagated: the daemon
 // being briefly unreachable must not stop the agent, and the resync loop keeps
 // the file correct in the meantime.
+//
+// Every end of a stream is followed by a pause that grows while the failures
+// keep coming. Docker's client reports a refused connection through the same
+// error channel as a dropped stream, so without the pause a stopped daemon
+// would be hammered in a tight loop.
 func (w *Watcher) runEvents(ctx context.Context, out chan<- Trigger) {
-	backoff := minBackoff
+	backoff := w.minBackoff
 
 	for ctx.Err() == nil {
 		events, errs, err := w.api.Events(ctx)
@@ -131,8 +155,16 @@ func (w *Watcher) runEvents(ctx context.Context, out chan<- Trigger) {
 		w.logDebug("event stream established, reconciling to close the gap")
 		w.emit(ctx, out, TriggerReconnect)
 
-		backoff = minBackoff
+		started := time.Now()
 		w.consume(ctx, events, errs, out)
+
+		if time.Since(started) >= stableStream {
+			backoff = w.minBackoff
+		}
+		if !sleepCtx(ctx, backoff) {
+			return
+		}
+		backoff = nextBackoff(backoff)
 	}
 }
 
@@ -256,7 +288,3 @@ func nextBackoff(d time.Duration) time.Duration {
 	}
 	return next
 }
-
-// BackoffForTest exposes the backoff progression so the policy can be tested
-// without waiting for it.
-func BackoffForTest(d time.Duration) time.Duration { return nextBackoff(d) }

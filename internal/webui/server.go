@@ -12,8 +12,10 @@ package webui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -81,14 +83,16 @@ type Config struct {
 	// Source is the host the agent runs on, useful when several agents are
 	// published from different machines.
 	Source string
+	// DisableEvents turns the Server-Sent Events channel off. The page then
+	// polls /api/entries instead. The zero value keeps the channel on.
+	DisableEvents bool
 }
 
 // Server is the monitoring HTTP server.
 type Server struct {
-	cfg    Config
-	log    *slog.Logger
-	hub    *hub
-	server *http.Server
+	cfg Config
+	log *slog.Logger
+	hub *hub
 
 	// mu guards lastResult's replacement and the stats provider.
 	mu sync.RWMutex
@@ -98,7 +102,7 @@ type Server struct {
 	lastResult atomic.Pointer[Snapshot]
 
 	// stats, when set, supplies the applier's counters.
-	stats func() (writes uint64, lastErr error, lastApply time.Time)
+	stats func() (writes uint64, lastApply time.Time, lastErr error)
 }
 
 // New builds a Server.
@@ -116,7 +120,7 @@ func New(cfg Config, log *slog.Logger) *Server {
 // SetStatsProvider connects the health endpoint to the applier's counters. It
 // is a method rather than a constructor argument so that the wiring order in
 // main stays simple.
-func (s *Server) SetStatsProvider(fn func() (writes uint64, lastErr error, lastApply time.Time)) {
+func (s *Server) SetStatsProvider(fn func() (writes uint64, lastApply time.Time, lastErr error)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.stats = fn
@@ -149,13 +153,33 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET /api/entries", s.handleEntries)
 	mux.HandleFunc("GET /api/config", s.handleConfig)
-	mux.HandleFunc("GET /api/events", s.handleEvents)
+	if !s.cfg.DisableEvents {
+		mux.HandleFunc("GET /api/events", s.handleEvents)
+	}
 
 	// Registered without a method so the response can explain the API rather
 	// than Go's bare "method not allowed".
 	mux.HandleFunc("/", s.handleRoot)
 
-	return s.withLogging(mux)
+	return s.withLogging(withSecurityHeaders(mux))
+}
+
+// withSecurityHeaders hardens every response.
+//
+// The page is self-contained, so nothing it needs lives on another origin and a
+// strict policy costs nothing: it forbids loading anything external, embedding
+// the page in a frame (clickjacking) and leaking the address in a Referer. The
+// inline script and style are part of the page itself, hence 'unsafe-inline'.
+func withSecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Content-Security-Policy",
+			"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "+
+				"connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "no-referrer")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // handleMetrics exposes counters in the Prometheus text format.
@@ -175,7 +199,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		lastApply time.Time
 	)
 	if stats != nil {
-		writes, lastErr, lastApply = stats()
+		writes, lastApply, lastErr = stats()
 	}
 
 	var b strings.Builder
@@ -189,10 +213,10 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	gauge("dhi_skipped", "Containers deliberately not published.", snap.Summary.Skipped)
 	gauge("dhi_sse_clients", "Connected event stream clients.", s.hub.count())
 
-	if writes > 0 {
-		fmt.Fprintf(&b, "# HELP dhi_hosts_writes_total Successful writes of the hosts file.\n"+
-			"# TYPE dhi_hosts_writes_total counter\ndhi_hosts_writes_total %d\n", writes)
-	}
+	// Always present, even at zero: a counter that appears only after its first
+	// increment makes rate() and absence alerts misbehave.
+	fmt.Fprintf(&b, "# HELP dhi_hosts_writes_total Successful writes of the hosts file.\n"+
+		"# TYPE dhi_hosts_writes_total counter\ndhi_hosts_writes_total %d\n", writes)
 	if !lastApply.IsZero() {
 		fmt.Fprintf(&b, "# HELP dhi_last_apply_timestamp_seconds Unix time of the last successful apply.\n"+
 			"# TYPE dhi_last_apply_timestamp_seconds gauge\ndhi_last_apply_timestamp_seconds %d\n",
@@ -211,10 +235,20 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte(b.String()))
 }
 
-// Run serves until ctx is cancelled, then shuts down gracefully.
-func (s *Server) Run(ctx context.Context, addr string) error {
-	s.server = &http.Server{
-		Addr:              addr,
+// Listen binds the address and returns the listener, so that a port that is
+// already taken is reported to the caller right away instead of being lost in a
+// goroutine.
+func Listen(addr string) (net.Listener, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen on %s: %w", addr, err)
+	}
+	return ln, nil
+}
+
+// Serve serves on ln until ctx is cancelled, then shuts down gracefully.
+func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
+	srv := &http.Server{
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		// No write timeout: the SSE stream is long lived by design. The read
@@ -222,10 +256,15 @@ func (s *Server) Run(ctx context.Context, addr string) error {
 		IdleTimeout: 120 * time.Second,
 	}
 
+	// Server-Sent Events responses never end by themselves and Shutdown does
+	// not cancel their requests, so without this every stop would sit out the
+	// whole grace period. Closing the hub ends each stream cleanly.
+	srv.RegisterOnShutdown(s.hub.closeAll)
+
 	errCh := make(chan error, 1)
 	go func() {
-		s.log.Info("web UI listening", "addr", addr)
-		if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		s.log.Info("web UI listening", "addr", ln.Addr().String())
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
 		}
@@ -238,9 +277,13 @@ func (s *Server) Run(ctx context.Context, addr string) error {
 	case <-ctx.Done():
 	}
 
-	// Shutdown closes the SSE connections by ending their responses, which is
-	// what unblocks the clients.
+	// If something still holds on after the grace period, the connections are
+	// closed outright.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return s.server.Shutdown(shutdownCtx)
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		_ = srv.Close()
+		return fmt.Errorf("shut down the web UI: %w", err)
+	}
+	return nil
 }

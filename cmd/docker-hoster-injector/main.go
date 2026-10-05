@@ -65,6 +65,7 @@ func start(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	api, err := dockerclient.New(ctx, dockerclient.Options{
 		Host:       cfg.DockerHost,
 		APIVersion: cfg.DockerAPIVersion,
+		Logger:     log,
 	})
 	if err != nil {
 		return fmt.Errorf("connect to Docker: %w", err)
@@ -91,6 +92,8 @@ func start(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		return fmt.Errorf("open %s: %w", cfg.HostsFile, err)
 	}
 
+	writer.SetOwnedSuffix(cfg.DNSSuffix)
+
 	// Recovery first. A file left damaged by a crash must be repaired before
 	// anything is written over it, so the first write lands on a known good
 	// baseline.
@@ -108,44 +111,42 @@ func start(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	}
 
 	// --- web UI ----------------------------------------------------------
+	var webDone chan struct{}
 	// Started before the first reconcile so the page is reachable immediately,
 	// even while the hosts file is still being brought up to date.
 	var web *webui.Server
 	if cfg.Web.Enabled {
-		web = webui.New(webui.Config{
-			DNSSuffix:  cfg.DNSSuffix,
-			HostsFile:  cfg.HostsFile,
-			TargetMode: string(cfg.TargetMode),
-			MountMode:  string(cfg.MountMode),
-			Version:    version,
-			Source:     hostname(),
-		}, log)
-
-		webDone := make(chan error, 1)
-		go func() {
-			if err := web.Run(ctx, cfg.Web.Addr); err != nil {
-				webDone <- err
-				return
-			}
-			webDone <- nil
-		}()
-
 		// The monitoring service is a convenience, never a dependency: a
 		// failure to bind must not stop the agent from managing the hosts file.
-		select {
-		case err := <-webDone:
-			if err != nil {
-				log.Warn("the web UI could not start, continuing without it",
-					"addr", cfg.Web.Addr, "error", err)
-				web = nil
-			}
-		case <-time.After(300 * time.Millisecond):
-			log.Info("web UI ready", "addr", cfg.Web.Addr)
+		// The address is bound here, synchronously, so a taken port is reported
+		// at once rather than discovered later.
+		ln, err := webui.Listen(cfg.Web.Addr)
+		if err != nil {
+			log.Warn("the web UI could not start, continuing without it",
+				"addr", cfg.Web.Addr, "error", err)
+		} else {
+			web = webui.New(webui.Config{
+				DNSSuffix:     cfg.DNSSuffix,
+				HostsFile:     cfg.HostsFile,
+				TargetMode:    string(cfg.TargetMode),
+				MountMode:     string(cfg.MountMode),
+				Version:       version,
+				Source:        hostname(),
+				DisableEvents: !cfg.Web.Events,
+			}, log)
+
+			webDone = make(chan struct{})
+			go func() {
+				defer close(webDone)
+				if err := web.Serve(ctx, ln); err != nil {
+					log.Warn("the web UI stopped", "error", err)
+				}
+			}()
 		}
 	}
 
 	// --- pipeline --------------------------------------------------------
-	applier := apply.New(cfg, api, writer, apply.Options{
+	applier := apply.New(cfg, api, apply.Options{
 		Writer:   writer,
 		Debounce: cfg.EventDebounce,
 		Logger:   log,
@@ -157,9 +158,9 @@ func start(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	})
 
 	if web != nil {
-		web.SetStatsProvider(func() (uint64, error, time.Time) {
-			lastApply, lastErr, writes := applier.Stats()
-			return writes, lastErr, lastApply
+		web.SetStatsProvider(func() (uint64, time.Time, error) {
+			lastApply, writes, lastErr := applier.Stats()
+			return writes, lastApply, lastErr
 		})
 	}
 
@@ -192,6 +193,9 @@ func start(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	// The applier returns once ctx is done and its in-flight write has
 	// finished, so waiting here guarantees the file is left consistent.
 	<-done
+	if webDone != nil {
+		<-webDone
+	}
 	log.Info("stopped cleanly",
 		"writes", writesOf(applier),
 		"hosts_file", cfg.HostsFile)
@@ -201,7 +205,7 @@ func start(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 // writesOf is a tiny helper so the shutdown log reads the applier's counter
 // under its own lock rather than reaching into it.
 func writesOf(a *apply.Applier) uint64 {
-	_, _, w := a.Stats()
+	_, w, _ := a.Stats()
 	return w
 }
 

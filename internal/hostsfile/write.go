@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -33,6 +34,11 @@ type Writer struct {
 	path string
 	mode config.MountMode
 
+	// suffix, when set, is the DNS suffix every record of ours ends with. It
+	// is how recovery tells a stale record of ours from a line of the
+	// operator's in a block left open by a crash.
+	suffix string
+
 	mu sync.Mutex
 
 	// lastGood is the most recent text known to be complete and parseable.
@@ -52,6 +58,19 @@ func NewWriter(path string, mode config.MountMode) (*Writer, error) {
 		return nil, errors.New("hosts file path must not be empty")
 	}
 	return &Writer{path: path, mode: mode}, nil
+}
+
+// SetOwnedSuffix tells the writer which DNS suffix its own records carry.
+//
+// It matters only when recovering a block that has no end marker: everything
+// after the opening marker is then of unknown origin, and without the suffix
+// the writer can only assume that every address line in it is its own. With
+// it, a line such as "192.168.1.10 nas.home" is recognised as the operator's
+// and kept.
+func (w *Writer) SetOwnedSuffix(suffix string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.suffix = strings.ToLower(strings.Trim(strings.TrimSpace(suffix), "."))
 }
 
 // Path is the file this writer manages.
@@ -138,10 +157,12 @@ func (w *Writer) Apply(entries []Entry) (changed bool, err error) {
 	}
 
 	// A block left open by a crash must not be trusted or extended blindly:
-	// it is rebuilt from scratch instead.
+	// it is rebuilt from scratch instead. What followed the opening marker is
+	// ours only if it looks like ours; anything else is the operator's.
 	if f.BlockTruncated {
-		f.Lines = stripOrphanBlockTail(f)
+		f.Lines = append(f.Lines, w.salvageOrphans(f.Orphans)...)
 		f.Managed = nil
+		f.Orphans = nil
 		f.HadBlock = false
 	}
 
@@ -315,6 +336,13 @@ func (w *Writer) Repair() (repaired bool, err error) {
 	}
 
 	data, rerr := os.ReadFile(w.path)
+	if rerr == nil && bytes.Equal(data, w.lastGood) {
+		// The file is exactly the baseline. Restoring it would rewrite the
+		// same bytes and report a repair that never happened; whatever is
+		// wrong with it is for Apply to rebuild, since a baseline taken from
+		// the damaged file has nothing better to offer.
+		return false, nil
+	}
 	switch {
 	case rerr != nil && errors.Is(rerr, fs.ErrNotExist):
 		// fall through to restore
@@ -352,14 +380,59 @@ func baselineHasBlock(baseline []byte) bool {
 	return f.HadBlock && !f.BlockTruncated
 }
 
-// stripOrphanBlockTail removes a managed block that has no closing marker,
-// which is what a crash between writing the header and the footer leaves
-// behind. Content inside the orphan is discarded because it is ours.
-func stripOrphanBlockTail(f *File) []Line {
-	// Parse leaves orphan content out of Lines entirely, so all that remains
-	// is to drop a dangling BeginMarker if the caller kept one. Keeping the
-	// file's Lines untouched is correct: they are already user content only.
-	return f.Lines
+// salvageOrphans returns the lines of an unterminated block that are not ours.
+//
+// A crash leaves a block without its end marker, and the writer's records are
+// at the end of the file, so the orphan normally holds nothing but our own
+// header and records. But the same shape appears when someone deletes the end
+// marker by hand and keeps editing, and then the operator's own lines sit
+// inside it. Dropping them would break the one promise this agent makes, so
+// only what is recognisably ours is discarded: the generated header and the
+// address lines under the owned suffix.
+func (w *Writer) salvageOrphans(orphans []Line) []Line {
+	var keep []Line
+	for _, l := range orphans {
+		switch l.Kind {
+		case LineComment:
+			if isHeaderLine(l.Raw) {
+				continue
+			}
+		case LineEntry:
+			if w.owns(Entry{IP: l.IP, Names: l.Names}) {
+				continue
+			}
+		}
+		keep = append(keep, l)
+	}
+	return keep
+}
+
+// owns reports whether an entry belongs to this agent: every name is under the
+// owned suffix. Without a configured suffix every entry is assumed to be ours,
+// which is the conservative choice for a block this agent wrote itself.
+func (w *Writer) owns(e Entry) bool {
+	if w.suffix == "" {
+		return true
+	}
+	if len(e.Names) == 0 {
+		return false
+	}
+	for _, n := range e.Names {
+		if !strings.HasSuffix(strings.ToLower(n), "."+w.suffix) {
+			return false
+		}
+	}
+	return true
+}
+
+func isHeaderLine(raw string) bool {
+	t := strings.TrimSpace(raw)
+	for _, h := range headerLines {
+		if t == h {
+			return true
+		}
+	}
+	return false
 }
 
 // syncDir fsyncs a directory so that a rename performed inside it becomes

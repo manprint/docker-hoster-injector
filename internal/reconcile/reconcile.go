@@ -299,6 +299,9 @@ func (r *Reconciler) namesFor(c dockerclient.Container) []string {
 // follows so that direct access to the container's own ports keeps working.
 func (r *Reconciler) addressesForContainer(c dockerclient.Container) ([]string, bool) {
 	hostSide := hostAddresses(c)
+	// Docker does not promise an order for the port list, and the order of the
+	// addresses ends up in the file, so it is fixed here.
+	sort.Strings(hostSide)
 	containerSide := containerAddresses(c)
 
 	var out []string
@@ -364,16 +367,19 @@ func containerAddresses(c dockerclient.Container) []string {
 
 // sort puts the result in a deterministic order so that identical state always
 // renders to identical bytes.
+//
+// Entries are ordered by container, and the addresses of one container keep the
+// order addressesForContainer gave them. That order is meaningful: in "both"
+// mode the host-side address must come first, because the resolver tries the
+// addresses of a name in file order. Sorting by address text would break it,
+// since "10.0.0.5" sorts before "127.0.0.1".
 func (r *Reconciler) sort(res *Result) {
 	sort.SliceStable(res.Entries, func(i, j int) bool {
 		a, b := res.Entries[i], res.Entries[j]
-		if a.IP.String() != b.IP.String() {
-			return a.IP.String() < b.IP.String()
-		}
 		if a.ContainerName != b.ContainerName {
 			return a.ContainerName < b.ContainerName
 		}
-		return strings.Join(a.Names, ",") < strings.Join(b.Names, ",")
+		return a.ContainerID < b.ContainerID
 	})
 
 	sort.SliceStable(res.Skipped, func(i, j int) bool {

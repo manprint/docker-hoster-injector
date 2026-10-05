@@ -107,7 +107,7 @@ func newHarness(t *testing.T, debounce time.Duration) *harness {
 	}
 
 	api := &fakeAPI{}
-	a := New(cfg, api, w, Options{Writer: w, Debounce: debounce})
+	a := New(cfg, api, Options{Writer: w, Debounce: debounce})
 	return &harness{api: api, writer: w, applier: a, path: path}
 }
 
@@ -276,7 +276,7 @@ func TestApplierSurvivesAListError(t *testing.T) {
 	// The important property: Run returns rather than dying.
 	h.run(t, triggers)
 
-	_, lastErr, writes := h.applier.Stats()
+	_, writes, lastErr := h.applier.Stats()
 	if lastErr == nil {
 		t.Error("the error was not recorded")
 	}
@@ -313,7 +313,7 @@ func TestApplierRecoversAfterAnError(t *testing.T) {
 	if !contains(h.hosts(), "nginx.docker.local") {
 		t.Errorf("the applier did not recover:\n%s", h.hosts())
 	}
-	_, lastErr, _ := h.applier.Stats()
+	_, _, lastErr := h.applier.Stats()
 	if lastErr != nil {
 		t.Errorf("the last error was not cleared: %v", lastErr)
 	}
@@ -332,7 +332,7 @@ func TestApplierCountsOnlyRealWrites(t *testing.T) {
 		h.run(t, triggers)
 	}
 
-	_, _, writes := h.applier.Stats()
+	_, writes, _ := h.applier.Stats()
 	if writes != 1 {
 		t.Errorf("writes = %d for five identical reconciles, want 1: an unchanged "+
 			"state must not touch the file", writes)
@@ -361,7 +361,7 @@ func TestApplierNotifiesObserver(t *testing.T) {
 	}}
 
 	updates := make(chan int, 4)
-	a := New(mustConfig(t), api, w, Options{
+	a := New(mustConfig(t), api, Options{
 		Writer: w,
 		OnChange: func(res reconcile.Result) {
 			updates <- len(res.Entries)

@@ -62,7 +62,3 @@ func renderIndex(cfg Config, snap Snapshot) (string, error) {
 	}
 	return buf.String(), nil
 }
-
-// Stylesheet exposes the CSS so a test can assert that the page is
-// self-contained.
-func Stylesheet() string { return styleCSS }

@@ -1184,3 +1184,81 @@ func TestBlockOnFileWithoutOne(t *testing.T) {
 		t.Errorf("Block = %+v, want empty for a file with no managed block", got)
 	}
 }
+
+// A block with no end marker is what a crash leaves, but also what a hand edit
+// that removed the marker looks like. The operator's lines that follow it must
+// survive the rebuild; only what is recognisably ours may go.
+func TestRebuildOfAnOpenBlockKeepsTheOperatorsLines(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "hosts")
+	before := "127.0.0.1 localhost\n" +
+		BeginMarker + "\n" +
+		headerLines[0] + "\n" +
+		headerLines[1] + "\n" +
+		"172.17.0.2 stale.docker.local\n" +
+		"192.168.1.10 nas.home\n" +
+		"# a note of mine\n"
+	if err := os.WriteFile(path, []byte(before), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	w, err := NewWriter(path, config.MountModeFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.SetOwnedSuffix("docker.local")
+
+	if _, err := w.Apply([]Entry{{IP: net.ParseIP("172.17.0.3"), Names: []string{"web.docker.local"}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(got)
+
+	for _, want := range []string{"127.0.0.1 localhost", "192.168.1.10 nas.home", "# a note of mine", "172.17.0.3 web.docker.local"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the rebuilt file lost %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "stale.docker.local") {
+		t.Errorf("a stale record of ours survived the rebuild:\n%s", text)
+	}
+	if strings.Count(text, BeginMarker) != 1 || strings.Count(text, EndMarker) != 1 {
+		t.Errorf("want exactly one closed block:\n%s", text)
+	}
+}
+
+// Adopt takes the file as the baseline, so Repair at startup has nothing better
+// to restore than what is already there. It must say so instead of reporting a
+// repair that rewrote the same bytes.
+func TestRepairRightAfterAdoptDoesNothing(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "hosts")
+	damaged := "127.0.0.1 localhost\n" + BeginMarker + "\n172.17.0.2 stale.docker.local\n"
+	if err := os.WriteFile(path, []byte(damaged), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	w, err := NewWriter(path, config.MountModeFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Adopt(); err != nil {
+		t.Fatal(err)
+	}
+	repaired, err := w.Repair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repaired {
+		t.Error("Repair reported a repair although it can only restore the damaged baseline")
+	}
+	if got, _ := os.ReadFile(path); string(got) != damaged {
+		t.Errorf("the file changed:\n%s", got)
+	}
+}

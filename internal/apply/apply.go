@@ -21,9 +21,16 @@ import (
 	"github.com/mint/docker-hoster-injector/internal/watcher"
 )
 
+// containerLister is the only part of the Docker client the applier needs. It
+// is declared here, in the consuming package, so the applier can be tested with
+// a one method fake.
+type containerLister interface {
+	ListRunning(ctx context.Context) ([]dockerclient.Container, error)
+}
+
 // Applier watches triggers and keeps the hosts file up to date.
 type Applier struct {
-	api        dockerclient.API
+	api        containerLister
 	writer     *hostsfile.Writer
 	reconciler *reconcile.Reconciler
 	debounce   time.Duration
@@ -45,7 +52,7 @@ type Applier struct {
 
 // Options configures an Applier.
 type Options struct {
-	// Writer manages the hosts file.
+	// Writer manages the hosts file. It is required.
 	Writer *hostsfile.Writer
 	// Debounce coalesces bursts of triggers. Zero applies immediately.
 	Debounce time.Duration
@@ -57,12 +64,7 @@ type Options struct {
 }
 
 // New returns an Applier.
-func New(
-	cfg config.Config,
-	api dockerclient.API,
-	writer *hostsfile.Writer,
-	opts Options,
-) *Applier {
+func New(cfg config.Config, api containerLister, opts Options) *Applier {
 	log := opts.Logger
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(discard{}, nil))
@@ -243,10 +245,10 @@ func (a *Applier) fail(msg string, err error) {
 }
 
 // Stats reports what the applier has done, for the metrics endpoint.
-func (a *Applier) Stats() (lastApply time.Time, lastErr error, writes uint64) {
+func (a *Applier) Stats() (lastApply time.Time, writes uint64, lastErr error) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return a.lastApply, a.lastErr, a.writes
+	return a.lastApply, a.writes, a.lastErr
 }
 
 // LastResult returns the most recent result published to the observer, so a

@@ -1,6 +1,8 @@
 package webui
 
 import (
+	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -50,15 +52,28 @@ func (s *Server) buildSnapshot(res reconcile.Result) Snapshot {
 		r.names = append(r.names, e.Names...)
 	}
 
-	sort.Strings(order)
+	// By name, then ID: a row order a person can scan, and still total.
+	sort.Slice(order, func(i, j int) bool {
+		a, b := byID[order[i]], byID[order[j]]
+		if a.container != b.container {
+			return a.container < b.container
+		}
+		return a.containerID < b.containerID
+	})
 
 	for _, id := range order {
 		r := byID[id]
 		names := dedupeSorted(r.names)
-		sort.Strings(r.addresses)
+
+		// Counted once per container: the same names are listed against each
+		// of its addresses, and counting them per address would inflate the
+		// figure whenever a container has more than one.
+		snap.Summary.Names += len(names)
 
 		// One Record per address, each carrying the full name list, so the
-		// file on disk and the page agree on what resolves where.
+		// file on disk and the page agree on what resolves where. The
+		// addresses keep the order of the file, which is the order a resolver
+		// tries them in.
 		for _, addr := range r.addresses {
 			snap.Records = append(snap.Records, Record{
 				Address:     addr,
@@ -67,7 +82,6 @@ func (s *Server) buildSnapshot(res reconcile.Result) Snapshot {
 				ContainerID: r.containerID,
 				State:       r.state,
 			})
-			snap.Summary.Names += len(names)
 		}
 		snap.Summary.Containers++
 	}
@@ -79,9 +93,29 @@ func (s *Server) buildSnapshot(res reconcile.Result) Snapshot {
 			State:       sk.State,
 			Reason:      string(sk.Reason),
 		})
-		snap.Summary.Skipped++
 	}
 
+	snap.Summary.Records = len(snap.Records)
+
+	// A contested name is shown next to the containers that are not published:
+	// a container that lost every one of its names appears nowhere else.
+	owners := make(map[string]string, len(byID))
+	for _, r := range byID {
+		owners[r.containerID] = r.container
+	}
+	for _, c := range res.Conflicts {
+		winner := owners[c.Winner.Owner]
+		if winner == "" {
+			winner = shortID(c.Winner.Owner)
+		}
+		snap.Skipped = append(snap.Skipped, SkippedContainer{
+			Container:   c.Name,
+			ContainerID: c.Winner.Owner,
+			State:       "conflict",
+			Reason: fmt.Sprintf("name wanted by %d containers, kept by %s",
+				len(c.Losers)+1, winner),
+		})
+	}
 	sort.Slice(snap.Skipped, func(i, j int) bool {
 		if snap.Skipped[i].Container != snap.Skipped[j].Container {
 			return snap.Skipped[i].Container < snap.Skipped[j].Container
@@ -89,32 +123,25 @@ func (s *Server) buildSnapshot(res reconcile.Result) Snapshot {
 		return snap.Skipped[i].ContainerID < snap.Skipped[j].ContainerID
 	})
 
-	snap.Summary.Records = len(snap.Records)
-
-	for _, c := range res.Conflicts {
-		snap.Skipped = append(snap.Skipped, SkippedContainer{
-			Container:   c.Name,
-			ContainerID: c.Winner.Owner,
-			State:       "conflict",
-			Reason:      "name claimed by more than one container",
-		})
-	}
+	// The counter always matches the rows the page shows.
+	snap.Summary.Skipped = len(snap.Skipped)
 
 	return snap
 }
 
+func shortID(id string) string {
+	if len(id) > 12 {
+		return id[:12]
+	}
+	return id
+}
+
+// dedupeSorted returns the distinct values in ascending order.
 func dedupeSorted(in []string) []string {
 	if len(in) < 2 {
 		return in
 	}
-	seen := make(map[string]struct{}, len(in))
-	out := make([]string, 0, len(in))
-	for _, s := range in {
-		if _, dup := seen[s]; dup {
-			continue
-		}
-		seen[s] = struct{}{}
-		out = append(out, s)
-	}
-	return out
+	out := slices.Clone(in)
+	slices.Sort(out)
+	return slices.Compact(out)
 }

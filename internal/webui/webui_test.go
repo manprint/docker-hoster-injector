@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mint/docker-hoster-injector/internal/hostsfile"
+	"github.com/mint/docker-hoster-injector/internal/naming"
 	"github.com/mint/docker-hoster-injector/internal/reconcile"
 )
 
@@ -241,8 +242,8 @@ func TestHealth(t *testing.T) {
 	s := New(testConfig(), nil)
 
 	t.Run("healthy", func(t *testing.T) {
-		s.SetStatsProvider(func() (uint64, error, time.Time) {
-			return 3, nil, time.Now()
+		s.SetStatsProvider(func() (uint64, time.Time, error) {
+			return 3, time.Now(), nil
 		})
 		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 		rec := httptest.NewRecorder()
@@ -259,8 +260,8 @@ func TestHealth(t *testing.T) {
 	// A degraded agent must be visible to a health check, otherwise an
 	// operator has to read the logs to notice a broken hosts file.
 	t.Run("degraded on a failed apply", func(t *testing.T) {
-		s.SetStatsProvider(func() (uint64, error, time.Time) {
-			return 1, errTest, time.Time{}
+		s.SetStatsProvider(func() (uint64, time.Time, error) {
+			return 1, time.Time{}, errTest
 		})
 		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 		rec := httptest.NewRecorder()
@@ -286,8 +287,8 @@ func TestMetrics(t *testing.T) {
 
 	s := New(testConfig(), nil)
 	s.Publish(resultWith())
-	s.SetStatsProvider(func() (uint64, error, time.Time) {
-		return 5, nil, time.Unix(1700000000, 0)
+	s.SetStatsProvider(func() (uint64, time.Time, error) {
+		return 5, time.Unix(1700000000, 0), nil
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
@@ -305,8 +306,8 @@ func TestMetrics(t *testing.T) {
 		}
 	}
 	// The fail gauge must flip, it is the whole point of the endpoint.
-	s.SetStatsProvider(func() (uint64, error, time.Time) {
-		return 5, errTest, time.Time{}
+	s.SetStatsProvider(func() (uint64, time.Time, error) {
+		return 5, time.Time{}, errTest
 	})
 	rec = httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
@@ -505,4 +506,190 @@ func hostsfileEntry(addr string, names ...string) hostsfile.Entry {
 // contextWithTimeout keeps the imports of the stream tests tidy.
 func contextWithTimeout(d time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), d)
+}
+
+// A container with two addresses lists the same names against each of them, but
+// those names are one set, not two.
+func TestSummaryCountsNamesOncePerContainer(t *testing.T) {
+	t.Parallel()
+
+	s := New(testConfig(), nil)
+	snap := s.buildSnapshot(resultWith())
+
+	// nginx: 1 name on 2 addresses; proj_web_1: 2 names on 1 address.
+	if snap.Summary.Names != 3 {
+		t.Errorf("summary.names = %d, want 3", snap.Summary.Names)
+	}
+	if snap.Summary.Records != 3 {
+		t.Errorf("summary.records = %d, want 3", snap.Summary.Records)
+	}
+}
+
+// Rows follow the order of the hosts file: the resolver tries a name's
+// addresses in file order, so the page must not re-sort them.
+func TestSnapshotKeepsTheAddressOrder(t *testing.T) {
+	t.Parallel()
+
+	res := reconcile.Result{Entries: []reconcile.Entry{
+		{Entry: hostsfileEntry("127.0.0.1", "a.docker.local"), ContainerID: "c1", ContainerName: "a", State: "running"},
+		{Entry: hostsfileEntry("10.0.0.5", "a.docker.local"), ContainerID: "c1", ContainerName: "a", State: "running"},
+	}}
+	snap := New(testConfig(), nil).buildSnapshot(res)
+
+	if len(snap.Records) != 2 || snap.Records[0].Address != "127.0.0.1" || snap.Records[1].Address != "10.0.0.5" {
+		t.Errorf("records = %+v, want 127.0.0.1 before 10.0.0.5", snap.Records)
+	}
+}
+
+// A container that lost every one of its names is in neither the records nor
+// the skipped list, so the conflict row is the only place it can be seen. The
+// counter must match the rows.
+func TestConflictsAreListedAndCounted(t *testing.T) {
+	t.Parallel()
+
+	res := resultWith()
+	res.Conflicts = []naming.Conflict{{
+		Name:   "nginx.docker.local",
+		Winner: naming.Claim{Name: "nginx.docker.local", Owner: "c1"},
+		Losers: []naming.Claim{{Name: "nginx.docker.local", Owner: "c9"}},
+	}}
+	snap := New(testConfig(), nil).buildSnapshot(res)
+
+	if snap.Summary.Skipped != len(snap.Skipped) {
+		t.Errorf("summary.skipped = %d but %d rows are listed", snap.Summary.Skipped, len(snap.Skipped))
+	}
+	var found *SkippedContainer
+	for i := range snap.Skipped {
+		if snap.Skipped[i].State == "conflict" {
+			found = &snap.Skipped[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("no conflict row in %+v", snap.Skipped)
+	}
+	if !strings.Contains(found.Reason, "2 containers") || !strings.Contains(found.Reason, "nginx") {
+		t.Errorf("reason = %q, want it to name the contest and who kept the name", found.Reason)
+	}
+}
+
+func TestDedupeSortedReallySorts(t *testing.T) {
+	t.Parallel()
+
+	got := dedupeSorted([]string{"b", "a", "b", "c", "a"})
+	if strings.Join(got, ",") != "a,b,c" {
+		t.Errorf("dedupeSorted = %v, want [a b c]", got)
+	}
+}
+
+// The counter exists from the start, at zero, so that rate() and absence
+// alerts behave.
+func TestMetricsExposeTheWriteCounterAtZero(t *testing.T) {
+	t.Parallel()
+
+	s := New(testConfig(), nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	if !strings.Contains(rec.Body.String(), "dhi_hosts_writes_total 0") {
+		t.Errorf("metrics lack the counter at zero:\n%s", rec.Body.String())
+	}
+}
+
+func TestResponsesCarrySecurityHeaders(t *testing.T) {
+	t.Parallel()
+
+	s := New(testConfig(), nil)
+	for _, path := range []string{"/", "/api/entries", "/healthz", "/nope"} {
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+
+		csp := rec.Header().Get("Content-Security-Policy")
+		if !strings.Contains(csp, "default-src 'none'") || !strings.Contains(csp, "frame-ancestors 'none'") {
+			t.Errorf("%s: Content-Security-Policy = %q", path, csp)
+		}
+		if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
+			t.Errorf("%s: missing X-Content-Type-Options", path)
+		}
+	}
+}
+
+// WEB_EVENTS=false removes the push channel and tells the page to poll.
+func TestDisableEventsRemovesTheStreamAndSwitchesThePageToPolling(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.DisableEvents = true
+	s := New(cfg, nil)
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/events", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("/api/events status = %d, want 404 when events are disabled", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if !strings.Contains(rec.Body.String(), "const EVENTS = false;") {
+		t.Error("the page was not told to poll")
+	}
+
+	rec = httptest.NewRecorder()
+	New(testConfig(), nil).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if !strings.Contains(rec.Body.String(), "const EVENTS = true;") {
+		t.Error("the page was not told to use the event stream")
+	}
+}
+
+// Stopping the agent must not wait out the grace period because a browser has
+// the page open: the event streams are ended, not abandoned.
+func TestServeStopsPromptlyWithAnOpenEventStream(t *testing.T) {
+	t.Parallel()
+
+	s := New(testConfig(), nil)
+	ln, err := Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(ctx, ln) }()
+
+	resp, err := http.Get("http://" + ln.Addr().String() + "/api/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	buf := make([]byte, 64)
+	if _, err := resp.Body.Read(buf); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Serve returned %v", err)
+		}
+		if d := time.Since(start); d > 2*time.Second {
+			t.Errorf("shutdown took %v with one open stream", d)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("Serve did not return after the context was cancelled")
+	}
+}
+
+func TestListenReportsATakenPortImmediately(t *testing.T) {
+	t.Parallel()
+
+	ln, err := Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	if _, err := Listen(ln.Addr().String()); err == nil {
+		t.Error("binding an address that is taken did not fail")
+	}
 }
