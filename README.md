@@ -1,701 +1,217 @@
 # docker-hoster-injector
 
-Rende raggiungibili i container Docker dall'host tramite un nome simbolico:
-un container chiamato `nginx` diventa `nginx.docker.local`, con le porte
-pubblicate che funzionano come sull'host (`nginx.docker.local:8080` se il
-container è avviato con `-p 8080:80`).
+Rende raggiungibili i container Docker dall'host con un nome simbolico: un
+container chiamato `nginx` diventa `nginx.docker.local`, e le porte pubblicate
+funzionano come sull'host (`nginx.docker.local:8080` se il container è avviato
+con `-p 8080:80`).
 
-L'agente osserva il ciclo di vita dei container e mantiene una sezione
-dedicata di `/etc/hosts` dell'host. **Non tocca mai le entry dell'utente.**
+L'agente osserva i container e mantiene **un blocco dedicato** di `/etc/hosts`
+dell'host. Le righe dell'utente non vengono mai toccate, e quando l'agente si
+ferma **il file torna identico, byte per byte, a com'era prima**.
 
-Funziona allo stesso modo su Debian/Ubuntu, RHEL/CentOS/Fedora e Alpine,
-con o senza `systemd`, perché non dipende dal resolver: la risoluzione passa
-per `nss-files`, presente ovunque.
+Funziona su qualunque Linux con Docker (Debian/Ubuntu, RHEL/Fedora, Alpine, con
+o senza `systemd`): non dipende dal resolver, usa `/etc/hosts`.
 
-> **Stato** — Funzionante e verificato end to end. La suite di accettazione
-> avvia una ventina di container reali in tutte le configurazioni
-> significative, verifica la risoluzione dal vivo, ogni modo di uscita
-> (`SIGTERM`, `SIGINT`, `SIGHUP`, `docker stop`, `kill -9`) e la web UI in un
-> browser vero (Playwright), poi ripristina `/etc/hosts`.
-> `sudo make test-integration` e `make test-e2e` per eseguirle.
+## Avvio rapido
 
-**Alla chiusura l'agente toglie i suoi record dal file**: dopo un arresto
-ordinato `/etc/hosts` torna identico, byte per byte, a com'era prima.
-
----
-
-## Indice
-
-- [Come funziona](#come-funziona)
-- [L'interfaccia di monitoraggio](#l-interfaccia-di-monitoraggio)
-- [Requisiti](#requisiti)
-- [Installazione](#installazione)
-- [Configurazione](#configurazione)
-- [Riferimento dei nomi pubblicati](#riferimento-dei-nomi-pubblicati)
-- [Sicurezza](#sicurezza)
-- [Durata e crash safety](#durata-e-crash-safety)
-- [Arresto e uscite forzate](#arresto-e-uscite-forzate)
-- [Comandi](#comandi)
-- [Sviluppo](#sviluppo)
-- [Test](#test)
-- [Architettura](#architettura)
-- [Risoluzione dei problemi](#risoluzione-dei-problemi)
-- [Licenza](#licenza)
-
----
-
-## Come funziona
-
-```
-┌──────────────┐   /events + list    ┌─────────────────────┐
-│ Docker Engine│◄────────────────────│                    │
-└──────────────┘                     │  docker-hoster-    │
-                                     │  injector          │
-┌──────────────┐   write             │                    │
-│ /etc/hosts   │◄────────────────────│                    │
-│ dell'host    │  (blocco gestito)   └─────────────────────┘
-└──────────────┘
+```bash
+git clone <questo repository> && cd docker-hoster-injector
+docker compose up -d --build
 ```
 
-1. Ascolta gli eventi del Docker Engine (`start`, `stop`, `die`, `destroy`, …).
-2. Ricalcola in modo completo la lista dei container ogni `RESYNC_INTERVAL`, per
-   riparare qualsiasi evento perso.
-3. Aggiorna un blocco delimitato in `/etc/hosts` dell'host, riscrivendolo solo
-   quando il contenuto cambia davvero.
+Poi, per provare:
 
-### La questione delle porte
+```bash
+docker run -d --name nginx -p 8081:80 nginx:alpine
+curl http://nginx.docker.local:8081/
+```
 
-Con `-p 8080:80 nginx`, il nome `nginx.docker.local` **non** può puntare
-all'IP del container: l'host chiederebbe la porta 8080 *dentro* il container,
-dove non c'è nulla. Perché `nginx.docker.local:8080` funzioni come da specifica,
-il nome deve risolvere dal lato host, dove vale la regola di port publishing.
-
-`TARGET_MODE` controlla questo comportamento:
-
-| Valore | Comportamento | Quando usarlo |
-|---|---|---|
-| `both` *(default)* | Prima l'indirizzo raggiungibile dall'host, poi quello del container | Caso normale: soddisfa la spec e permette anche l'accesso diretto alle porte interne |
-| `published` | Solo indirizzo raggiungibile dall'host | Se si vuole essere espliciti |
-| `container-ip` | Solo IP del container | Quando i record devono risolvere **da altri host** della rete |
-
-Con `both`, un resolver restituisce più indirizzi e i client (curl, Go, browser)
-li provano in ordine: `nginx.docker.local:8080` risolve subito, e
-`nginx.docker.local:80` funziona comunque sul secondo indirizzo.
-
----
-
-## L'interfaccia di monitoraggio
-
-Su `http://127.0.0.1:8080` c'è una pagina con la tabella dei record
-pubblicati, che si aggiorna da sola.
-
-| Rotta | Contenuto |
-|---|---|
-| `GET /` | La pagina, con lo snapshot già incorporato: la tabella è popolata al primo rendering |
-| `GET /api/entries` | Lo stesso dato in JSON, per script e per il fallback |
-| `GET /api/config` | La configurazione della distribuzione |
-| `GET /api/events` | Stream SSE: ogni messaggio è uno snapshot completo. Assente con `WEB_EVENTS=false`: la pagina interroga allora `/api/entries` ogni 5 s |
-| `GET /healthz` | `503` se l'ultima applicazione è fallita; è anche ciò che interroga l'`HEALTHCHECK` dell'immagine |
-| `GET /metrics` | Contatori in formato Prometheus |
-
-### I link di accesso
-
-La tabella ha **una riga per container**, con colonne di larghezza fissa
-(Container, Stato, Indirizzi, Nomi, Open) che non si spostano quando cambia il
-contenuto. Gli indirizzi **IPv6 non sono mostrati** nella pagina (restano nel
-file hosts e nell'API: `::1` per una porta pubblicata). Un indirizzo IPv6 compare
-solo se è l'unico modo di raggiungere qualcosa.
-
-L'ultima colonna, **Open**, ha **un solo link per porta**, con un tag che dice se
-è **TCP** o **UDP** (a parole, in colore diverso e con bordo pieno o tratteggiato,
-così non dipende dal solo colore):
-
-| Porta | Link | Perché |
-|---|---|---|
-| Pubblicata (`-p`) | `http://<nome>:<porta dell'host>/` | È lo scopo del nome: `nginx.docker.local:8080` funziona come `localhost:8080` |
-| Solo esposta (`--expose`, `EXPOSE`) | `http://<indirizzo del container>:<porta del container>/` | Si usa l'**indirizzo** e non il nome, perché in modalità `both` il nome risolve prima sull'host, e un servizio dell'host sulla stessa porta risponderebbe al posto del container. Con `TARGET_MODE=container-ip` il nome risolve solo sul container e si usa il nome |
-
-Una porta pubblicata e in ascolto nel container non è elencata due volte: vale il
-link pubblicato. Una porta legata sia a `0.0.0.0` sia a `::` ha un link solo.
-Sotto i 900 px la tabella diventa un elenco di **schede** (nome e stato in testa,
-poi ogni valore sotto il nome della colonna), con chip alti a sufficienza per il
-tocco; nessuna larghezza di schermo produce scorrimento orizzontale.
-
-Regole:
-
-- Le porte `443`, `4443`, `8443`, `9443` sono `https`; le altre `http`.
-- Le porte di protocolli noti come non web (SSH, database, broker, …) e le porte
-  UDP **si vedono ma non sono link**. Il protocollo si giudica dalla porta
-  *interna* del servizio: un Postgres pubblicato su `49153` resta un database.
-- Docker conosce solo le porte **dichiarate**: pubblicate (`-p`) o esposte
-  (`EXPOSE`, `--expose`). Un server che ascolta su una porta mai dichiarata non
-  compare, e non c'è modo di scoprirlo da fuori.
-- I link si compongono nel server e il browser li accetta solo se iniziano per
-  `http://` o `https://`: un valore diverso (`javascript:`, `data:`) viene
-  mostrato come testo e mai come link. Hanno `rel="noopener noreferrer"`.
-- Un container in pausa non ha record: ha un indirizzo ma non risponde, e un
-  nome che risolve e poi si blocca è peggio di un nome che non risolve.
-
-Ogni messaggio SSE è uno **snapshot completo**, non un diff: il payload è
-piccolo e un client che si riconnette in qualsiasi momento è subito corretto,
-senza dover riprodurre una cronologia che potrebbe aver perso.
-
-La pagina è interamente autosufficiente: foglio di stile e logica sono
-incorporati, nessuna richiesta esterna. Serve perché il servizio gira spesso
-su reti isolate.
-
-Ogni risposta porta una `Content-Security-Policy` restrittiva (niente risorse
-esterne, niente frame), `X-Content-Type-Options: nosniff` e
-`Referrer-Policy: no-referrer`.
-
-**Non ha autenticazione**, come richiesto. È accettabile solo perché è
-**read-only**: qualsiasi metodo diverso da `GET` e `HEAD` riceve `405`, quindi
-non esiste una rotta che possa cambiare qualcosa. Va comunque legata a
-loopback.
+La pagina di monitoraggio è su <http://127.0.0.1:8080>. Per fermare e restituire
+il file: `docker compose down`.
 
 ## Requisiti
 
-- Linux con Docker Engine **19.03 o successivo** (API 1.40+). Il client effettua
-  la negoziazione automatica della versione, quindi le versioni più recenti
-  funzionano senza configurazione, e un daemon più vecchio dell'API 1.40 viene
-  rifiutato con un messaggio chiaro. L'agente usa solo elenco container, stream
-  di eventi e versione del motore. Il limite è verificato con richieste legate a
-  ciascuna versione API da 1.40 a 1.44 (`DOCKER_API_VERSION`) contro un daemon
-  reale: non è stato provato su un motore realmente così vecchio, perché la VM di
-  sviluppo ne ha uno recente. Su Docker precedente al 25 va quindi confermato in
-  produzione con `docker-hoster-injector run` e il log `connected to Docker`.
-- Funziona anche con **Docker rootless** impostando `DOCKER_HOST`.
-- Nessuna dipendenza Go oltre al solo client Docker ufficiale.
-
----
+- Linux con Docker Engine **19.03 o successivo** (API 1.40+). Un daemon più
+  vecchio viene rifiutato con un messaggio chiaro. I dettagli sulle versioni
+  provate sono in [docs/development.md](docs/development.md#compatibilità-con-docker-più-vecchi).
+- Docker rootless: impostare `DOCKER_HOST`.
 
 ## Installazione
 
 ### Docker Compose (consigliato)
 
-```bash
-cp docker-compose.yml docker-compose.override.yml
-docker compose up -d
-```
-
-Il compose di esempio è già configurato con le impostazioni sicure: capability
-droppate, `no-new-privileges`, root filesystem read-only, web UI legata solo a
-loopback.
+Il `docker-compose.yml` incluso monta il socket Docker e la directory `/etc`
+(modalità `dir`), toglie ogni capability, imposta il filesystem in sola lettura
+e lega la pagina di monitoraggio a loopback. Basta `docker compose up -d --build`.
 
 ### Docker CLI
 
 ```bash
+docker build -t docker-hoster-injector:dev .
+
 docker run -d --name docker-hoster-injector \
   --restart unless-stopped \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
-  -v /etc/hosts:/etc/hosts \
-  -e DNS_SUFFIX=docker.local \
+  -v /etc:/host/etc \
+  -e HOSTS_FILE=/host/etc/hosts -e HOSTS_MOUNT_MODE=dir \
   -p 127.0.0.1:8080:8080 \
   docker-hoster-injector:dev
 ```
 
-### Le due modalità di montaggio
+### Montare la directory, non il file
 
-L'agente deve poter riscrivere `/etc/hosts`. Esistono due strategie, con
-protezioni diverse.
+Si consiglia di montare `/etc` (modalità `dir`): il file viene sostituito con un
+rename, quindi l'aggiornamento è atomico e continua a funzionare anche se
+qualcosa sull'host riscrive `/etc/hosts` con un rename (editor, `sed -i`, tool di
+provisioning). Montare il solo file (`-v /etc/hosts:/etc/hosts`, modalità `file`,
+predefinita dell'immagine) richiede meno privilegi, ma un bind mount di file
+segue l'inode: se l'host lo sostituisce, il container continua a scrivere sul
+vecchio file. In quel caso basta `docker restart docker-hoster-injector`.
+Dettagli in [docs/crash-safety.md](docs/crash-safety.md).
 
-**Opzione A — mount del singolo file (minor privilegio, default dell'immagine, `docker run`)**
+## Come funziona
 
-```yaml
-volumes:
-  - /etc/hosts:/etc/hosts
-environment:
-  HOSTS_MOUNT_MODE: file      # default
-```
+1. Ascolta gli eventi del Docker Engine (`start`, `stop`, `die`, `destroy`, …).
+2. Ogni `RESYNC_INTERVAL` rilegge tutto lo stato, per riparare eventi persi.
+3. Riscrive il blocco in `/etc/hosts` solo quando il contenuto cambia.
 
-Il contenuto nuovo viene scritto con **una singola `write(2)`** sopra il
-vecchio e poi ritagliato. `rename(2)` non è utilizzabile: su un bind mount
-restituisce `EBUSY`. Non si tronca mai prima di scrivere, quindi la finestra
-di incoerenza è di microsecondi e non può mai lasciare un file vuoto.
+Per ogni container in esecuzione si pubblicano il suo nome e i suoi alias di rete.
 
-**Opzione B — mount della directory (atomico, usata dal `docker-compose.yml`)**
+| Container | Record |
+|---|---|
+| `nginx` | `nginx.docker.local` |
+| `myproject_web_1` | `myproject_web_1.docker.local` e `myproject--web--1.docker.local` |
 
-```yaml
-volumes:
-  - /etc:/host/etc
-environment:
-  HOSTS_FILE: /host/etc/hosts
-  HOSTS_MOUNT_MODE: dir
-```
+Non vengono pubblicati i container fermi o in pausa, con rete `none` o `host`, né
+nomi riservati come `localhost`. Perché `_` diventa `--` e come si risolvono i
+nomi contesi: [docs/naming.md](docs/naming.md).
 
-Scrive un file temporaneo e lo rinomina: la modifica è **atomica** e, poiché il
-bind mount segue la directory e non l'inode, **continua a funzionare anche se
-qualcosa sull'host sostituisce `/etc/hosts` con un rename**. Il prezzo è esporre
-`/etc` in scrittura al container (l'agente crea e rimuove solo i propri file
-temporanei `.hosts-docker-hoster-injector-*`). Per questo il compose di esempio
-usa questa modalità: è la più robusta. L'opzione A resta valida dove si
-preferisce il minor privilegio e si accetta il limite sull'inode (vedi sotto).
+### `TARGET_MODE`
 
-Entrambe le modalità sono coperte dall'intera suite di test, crash compresi.
+Con `-p 8080:80` il nome deve puntare all'**host**, non all'IP del container,
+altrimenti la porta 8080 non risponderebbe.
 
----
+| Valore | Comportamento |
+|---|---|
+| `both` *(default)* | Prima l'indirizzo dell'host, poi quello del container: `nome:8080` e `nome:80` funzionano entrambi |
+| `published` | Solo l'indirizzo dell'host |
+| `container-ip` | Solo l'IP del container (utile se i record devono servire altri host della rete) |
 
 ## Configurazione
 
-Tutte le variabili sono opzionali. Un valore vuoto equivale a non impostato e
-ripiega sul default.
+Tutte le variabili sono opzionali.
 
 | Variabile | Default | Descrizione |
 |---|---|---|
-| `DNS_SUFFIX` | `docker.local` | Dominio base. Deve avere almeno due label validi |
-| `HOSTS_FILE` | `/etc/hosts` | Path assoluto del file da gestire |
-| `HOSTS_MOUNT_MODE` | `file` | `file` oppure `dir` (vedi sopra) |
+| `DNS_SUFFIX` | `docker.local` | Dominio base (almeno due label) |
 | `TARGET_MODE` | `both` | `both`, `published` o `container-ip` |
+| `HOSTS_FILE` | `/etc/hosts` | Percorso assoluto del file da gestire |
+| `HOSTS_MOUNT_MODE` | `file` | `file` o `dir`; il compose usa `dir` |
 | `RESYNC_INTERVAL` | `30s` | Periodo della riconciliazione completa |
 | `EVENT_DEBOUNCE` | `250ms` | Coalescenza dei burst di eventi |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
-| `LOG_FORMAT` | `json` | `json` oppure `text` |
-| `WEB_ENABLED` | `true` | Abilita il server di monitoraggio |
+| `LOG_FORMAT` | `json` | `json` o `text` |
+| `WEB_ENABLED` | `true` | Abilita la pagina di monitoraggio |
 | `WEB_ADDR` | `:8080` | Indirizzo di ascolto dentro il container |
-| `WEB_EVENTS` | `true` | Canale SSE (disattiva per il polling) |
+| `WEB_EVENTS` | `true` | Aggiornamento via SSE (`false`: polling) |
 | `DOCKER_HOST` | — | Passato al client Docker (rootless) |
 
-Una configurazione non valida **non** avvia il processo e riporta **tutti** i
-campi errati in una volta sola:
+Una configurazione non valida impedisce l'avvio e riporta **tutti** i campi
+errati insieme.
 
-```console
-$ DNS_SUFFIX='!!' TARGET_MODE=sideways LOG_LEVEL=loud docker-hoster-injector
-docker-hoster-injector: DNS_SUFFIX: must contain at least two labels, e.g. docker.local
-TARGET_MODE="sideways": must be one of: both, published, container-ip
-LOG_LEVEL="loud": must be one of: debug, info, warn, error
-```
+## La pagina di monitoraggio
 
----
+Su `http://127.0.0.1:8080`, si aggiorna da sola: una riga per container con
+stato, indirizzi IPv4, nomi e **un link cliccabile per ogni porta**, marcata
+**TCP** o **UDP**. Le porte pubblicate si aprono con il nome e la porta
+dell'host, quelle solo esposte con l'indirizzo del container. Le porte che non
+parlano HTTP (database, SSH, …) e le UDP sono mostrate ma non sono link. Su
+schermi stretti le righe diventano schede.
 
-## Riferimento dei nomi pubblicati
+Non ha autenticazione: è **sola lettura** (ogni metodo diverso da `GET`/`HEAD`
+riceve `405`) e va tenuta su loopback. Rotte, regole dei link e sicurezza della
+pagina: [docs/web-ui.md](docs/web-ui.md).
 
-Per ogni container in esecuzione vengono pubblicati il nome del container e
-tutti gli alias di rete. Ogni nome è offerto in due forme quando differiscono:
+## Arresto e comandi
 
-| Container | Record pubblicati |
-|---|---|
-| `nginx` | `nginx.docker.local` |
-| `myproject_web_1` | `myproject_web_1.docker.local`, `myproject--web--1.docker.local` |
-
-### Perché l'underscore diventa un doppio trattino
-
-La sostituzione naturale sarebbe `_` → `-`, ma **è sbagliata**: Compose genera
-nomi come `web_1` e `web-1` che sono container distinti, e con quella mappa
-finirebbero con lo stesso record, sovrascrivendosi a vicenda. Il traffico
-finirebbe sul container sbagliato, che è il modo peggiore in cui può rompersi.
-
-`_` diventa quindi `--`, e i trattini esistenti vengono preservati: i nomi
-distinti restano distinti.
-
-```
-web_1       →  web--1
-web-1       →  web-1        (invariato)
-proj_web_1  →  proj--web--1
-proj-web-1  →  proj-web-1
-```
-
-### Sui limiti di questa garanzia
-
-Docker ammette `[a-zA-Z0-9][a-zA-Z0-9_.-]*`, mentre un host name RFC 1123
-ammette solo `[a-z0-9-]`: l'alfabeto di uscita è più piccolo di quello di
-ingresso, quindi **nessuna sanitizzazione può essere iniettiva**. `a__b` e
-`a--b` finiscono inevitabilmente sullo stesso nome.
-
-Ciò che garantisce il progetto è la proprietà che conta davvero:
-
-- ogni container pubblica **sempre il proprio nome grezzo**, che Docker
-  garantisce unico, quindi nessun container resta irraggiungibile;
-- ogni nome conteso viene assegnato in modo **deterministico** (priorità alla
-  creazione più antica, poi ID minimo), quindi il file non "sbatte" tra un
-  riavvio e l'altro;
-- i nomi riservati (`localhost`, `broadcasthost`, `ip6-*`, …) vengono rifiutati,
-  perché sovrascriverli romperebbe la risoluzione dell'host stesso.
-
-### Nomi esclusi
-
-- Non pubblicati: container fermi, in `paused`, con rete `none` o `host`.
-- Non pubblicati se sono già nel loro ciclo di morte (`dead`, `removing`).
-- Esclusi i nomi riservati del sistema.
-
----
-
-## Sicurezza
-
-- **Il socket Docker è equivalente a root sull'host.** Chi vi accede può
-  montare qualsiasi volume. È montato in sola lettura (`ro`), ma va trattato
-  come una superficie privilegiata: non esporlo oltre il necessario.
-- L'API web **non ha autenticazione**, come richiesto. Per compensare è
-  read-only e pubblica solo nomi, indirizzi e porte. Va comunque legata a
-  loopback (`127.0.0.1:8080:8080`), perché rivela informazioni sulla topologia
-  interna.
-- Il container non ha bisogno di capacità Linux: `cap_drop: ALL` +
-  `no-new-privileges` + root filesystem read-only sono applicati nel compose.
-- Il binario è statico (`CGO_ENABLED=0`) e gira su `scratch`: nessuna shell,
-  nessuna libreria da mantenere.
-
-```bash
-# Se l'utente non è nel gruppo docker:
---group-add "$(getent group docker | cut -d: -f3)"
-```
-
----
-
-## Durata e crash safety
-
-`/etc/hosts` è un file di sistema critico: se la risoluzione dei nomi si rompe,
-l'host diventa inutilizzabile. Le scelte progettuali mirano a rendere ogni
-scrittura innocua anche sotto crash.
-
-### Le garanzie
-
-1. **Il blocco gestito sta in fondo al file.** Una scrittura interrotta può
-   perdere al massimo i record dei container, mai le entry dell'utente.
-2. **L'ordine di scrittura è scelto per il crash.** Il contenuto è sempre scritto
-   in un'unica `write(2)` sopra il vecchio. Se il nuovo è più corto, il file è
-   accorciato **prima**: un crash lascia al più un blocco senza marcatore finale,
-   che il recovery riconosce e ricostruisce. Accorciare dopo lascerebbe righe
-   complete del vecchio contenuto dopo `END`, indistinguibili da quelle
-   dell'utente e quindi conservate per sempre.
-3. **Il file viene `fsync`-ato prima di riportare successo**, e in modalità
-   `dir` anche la directory, così il `rename` è durevole.
-4. **Ogni scrittura è idempotente**: se il blocco non cambia, il file non viene
-   toccato e il suo `mtime` non cambia. Uno stato stazionario non costa I/O.
-5. **`flock` consultivo** serializza più istanze dell'agente sullo stesso file.
-6. **Le entry dell'utente sono preservate byte per byte**, incluse le righe
-   malformate, le righe vuote finali, il CRLF, i byte non UTF-8 e le righe lunghe
-   quanto si vuole (nessun limite). Aggiungere il blocco e poi toglierlo è un
-   **round trip esatto**: verificato anche con fuzzing. L'unica differenza
-   ammessa è un `\n` finale, se il file non lo aveva.
-7. **Permessi, proprietario e symlink del file sono preservati** nella modalità
-   `dir`. Un `/etc/hosts` che è un link simbolico resta un link e si scrive il
-   suo bersaglio.
-8. **Nessun file temporaneo resta in giro**: quelli lasciati da un processo
-   ucciso a metà (`.hosts-docker-hoster-injector-*`, più vecchi di un minuto)
-   sono rimossi al successivo avvio.
-
-### Cosa fa il recovery
-
-Al riavvio l'agente ispeziona il file. Un blocco lasciato aperto (senza
-marcatore finale: l'impronta di un crash) viene **ricostruito**, non esteso, così
-i record orfani non sopravvivono. Del blocco aperto si scartano solo
-l'intestazione generata e le righe i cui nomi stanno sotto `DNS_SUFFIX`:
-**qualsiasi altra riga resta**, perché lo stesso aspetto lo ha un file in cui
-qualcuno ha cancellato a mano il marcatore finale e ha continuato a scrivere.
-
-```bash
-docker restart docker-hoster-injector
-```
-
-### Comportamenti da conoscere
-
-- **Mount del singolo file (`file`) e inode** (il compose di esempio non lo usa). Un bind mount segue l'inode, non il
-  percorso: se qualcosa sull'host *sostituisce* `/etc/hosts` con un rename
-  (alcuni editor, `sed -i`, certi tool di provisioning), il container continua a
-  scrivere sul vecchio file e l'host non vede più i record. In quel caso
-  `docker restart docker-hoster-injector`, oppure usare la modalità `dir`.
-- **Il socket `:ro` non limita l'API.** `:ro` impedisce di modificare il file del
-  socket, non le richieste che vi passano.
-- **Dopo un riavvio del daemon Docker** lo stream di eventi viene riaperto da
-  solo, con backoff, e ogni riconnessione innesca una riconciliazione.
-- **Ogni chiamata a Docker ha un timeout** (15 s): un daemon che non risponde non
-  blocca la scrittura del file per sempre.
-
-### Il limite, dichiarato
-
-Se **un altro processo** svuota il file o cancella entry dell'utente, un
-processo nuovo non ha copia di quei dati e non può recuperarli. Non viene
-inventato nulla: si perdono i record dei container, che verranno ricreati al
-prossimo ciclo, ma l'agente non finge di ripristinare contenuto che non ha mai
-visto. Questa distinzione è codificata nei test: i danni propri dell'agente
-sono recuperabili, quelli esterni no.
-
----
-
-## Arresto e uscite forzate
-
-Un record che nessuno tiene più aggiornato prima o poi punta all'indirizzo di un
-altro container. Per questo il blocco **non sopravvive** al processo che lo
-mantiene.
-
-| Come finisce l'agente | Cosa succede al file |
-|---|---|
-| `SIGTERM` (`docker stop`, systemd), `SIGINT` (Ctrl-C), `SIGHUP` | Il blocco viene **rimosso**; il file torna quello dell'operatore. Exit code 0 |
-| Segnali ripetuti durante la pulizia | Assorbiti: la pulizia non viene interrotta |
-| Errore fatale all'avvio (es. Docker non raggiungibile) | Il file viene aperto *prima* di contattare Docker, quindi un blocco rimasto da un'esecuzione precedente viene rimosso comunque |
-| `panic` in qualunque goroutine | Lo stack viene registrato, l'agente si ferma e rimuove il blocco; exit code 1 |
-| Arresto che non finisce | Dopo 8 s il processo esce da solo (sotto i 10 s di grazia di Docker), invece di ricevere un `SIGKILL` a metà scrittura |
-| `SIGKILL`, OOM killer, perdita di alimentazione | **Nessun codice può girare**: il blocco resta. Il successivo avvio lo ripara e lo riallinea (nessun duplicato, nessuna riga spuria), oppure si usa `docker-hoster-injector clean` |
-
-La rimozione è **idempotente**: farla due volte, o su un file senza blocco o
-inesistente, non cambia nulla (nemmeno l'`mtime`) e non crea il file.
-
-Se qualcosa riscrive il file mentre l'agente è fermo, l'agente non ne sa nulla:
-alla ripartenza il file viene riletto e il blocco ricostruito sopra ciò che c'è.
-
-## Comandi
+Alla chiusura ordinata (`docker stop`, `SIGTERM`, `SIGINT`, `SIGHUP`) l'agente
+**toglie il suo blocco** da `/etc/hosts`. Se viene ucciso (`kill -9`, OOM, perdita
+di alimentazione) nessun codice può girare e il blocco resta: al riavvio viene
+riparato e riallineato, oppure lo si toglie con `clean`.
 
 ```text
 docker-hoster-injector [run]        mantiene il file (predefinito)
-docker-hoster-injector clean        toglie il blocco e i temporanei lasciati da un'esecuzione uccisa
-docker-hoster-injector healthcheck  esce con 0 se l'agente in esecuzione risponde 200 su /healthz
+docker-hoster-injector clean        toglie il blocco e i temporanei di un'esecuzione uccisa
+docker-hoster-injector healthcheck  esce con 0 se l'agente risponde 200 su /healthz
 docker-hoster-injector version
 ```
 
-`clean` non richiede né Docker né un agente in esecuzione, e si può lanciare più
-volte. Con l'immagine:
+`clean` non richiede Docker né un agente in esecuzione e si può ripetere:
 
 ```bash
-docker run --rm -v /etc/hosts:/etc/hosts docker-hoster-injector:dev clean
+docker run --rm -v /etc:/host/etc -e HOSTS_FILE=/host/etc/hosts -e HOSTS_MOUNT_MODE=dir \
+  docker-hoster-injector:dev clean
 ```
 
-L'immagine definisce un `HEALTHCHECK` che usa `healthcheck`: non ha shell né curl,
-quindi il binario è la propria sonda. Un agente la cui ultima scrittura è fallita
-risponde `503` ed è segnalato `unhealthy`.
+L'immagine ha un `HEALTHCHECK` (il binario è la propria sonda, non ci sono shell né
+curl); un agente la cui ultima scrittura è fallita risulta `unhealthy`. Le garanzie
+complete sul file e sulle uscite: [docs/crash-safety.md](docs/crash-safety.md).
 
----
+## Sicurezza
 
-## Sviluppo
-
-```bash
-make help          # elenco dei target
-make build         # binario in ./bin
-make test          # test unitari
-make test-race     # test unitari con race detector
-make cover         # copertura
-make lint          # go vet + golangci-lint (staticcheck, errcheck, govet, revive, gosec)
-make fuzz          # fuzzing del round trip del file hosts (30 s)
-sudo make test-integration
-make test-e2e      # test del browser sulla web UI (Playwright)
-make image
-```
-
-Le regole di stile e di robustezza che il progetto si impone sono in
-[`BestPractice.md`](BestPractice.md); il set di linter che le verifica è in
-`.golangci.yml`. Le direttive `//nolint` portano sempre la motivazione.
-
-Toolchain: il progetto dichiara `go 1.25` come minimo ed è sviluppato e testato con
-**Go 1.27** (riga `toolchain` di `go.mod`, immagine `golang:1.27-alpine`).
-
----
-
-## Test
-
-```bash
-make test              # unitari, veloci
-make test-race         # obbligatorio: la concorrenza è il cuore del progetto
-make test-integration  # crash, uscite, immagine, web UI, estate di container (build tag, root)
-make test-e2e          # web UI in un browser vero (Playwright + Chrome di sistema)
-make fuzz              # round trip del file hosts
-```
-
-Copertura attuale dei test unitari: **~85%** delle dichiarazioni (`version` 100%,
-`reconcile` 95%, `naming` 93%, `config` 93%, `webui` 93%, `watcher` 92%, `apply`
-91%, `hostsfile` 86%, `agent` 78%, `dockerclient` 60%). `dockerclient` è più bassa perché quasi
-tutto quel package parla con il daemon; la parte più delicata, lo stream di
-eventi, è però coperta da un finto daemon HTTP nei test unitari: un test di
-accettazione non basta a vedere uno stream che si chiude senza avvisare.
-
-### Cosa coprono
-
-| Area | Cosa è verificato |
-|---|---|
-| Configurazione | Default, override, valori vuoti, normalizzazione, **tutti gli errori in un colpo** |
-| Naming | Corpus di nomi reali (Compose v1/v2, Swarm, k8s, non-ASCII, 300 caratteri, metacaratteri), idempotenza, stabilità, collisioni |
-| Parsing hosts | Classificazione righe, byte-per-byte, CRLF, righe malformate, blocchi orfani |
-| Scrittura | Idempotenza, preserva entry utente, entrambe le modalità, concorrenza, assenza di file temporanei, `flock` |
-| **Round trip** | Aggiungi + togli = byte originali (CRLF, righe vuote finali, senza `\n` finale, byte non UTF-8, riga da 6 MB), con **fuzzing**; nessun residuo dopo `END`; symlink e permessi preservati; pulizia dei temporanei |
-| **Ciclo di vita** | `internal/agent` con un Docker finto: arresto rimuove il blocco, riavvio dopo kill converge, panic, errore all'avvio, `clean` idempotente |
-| Link della web UI | Una porta un link (pubblicata → nome:porta host, esposta → indirizzo:porta container), IPv6 nascosto, container-ip, porte non web e UDP, nome preferito, escape di `</script>` |
-| **Crash** | `SIGKILL` reale durante le scritture, 15 round per modalità, recovery da ogni forma di danno |
-| Iniezione | Un nome con `\n` **non può** iniettare record nel file dell'host |
-| Accettazione | ~20 container reali, dalla creazione al `kill -9`, con verifica HTTP reale |
-| **Uscite** | Processo vero: `SIGTERM`/`SIGINT`/`SIGHUP` in entrambe le modalità, segnali ripetuti, `kill -9` + riavvio, `clean`, Docker irraggiungibile, permessi del file |
-| **Immagine** | `docker stop` restituisce il file all'operatore (bind mount di file e di directory), `docker kill` + `clean`/riavvio, `HEALTHCHECK` healthy |
-| **Browser** | Playwright: tabella = API = file hosts, niente IPv6, tag TCP/UDP, link cliccabili e funzionanti, colonne dimensionate, filtro, aggiornamenti dal vivo, polling, dati ostili, schede su schermo stretto (320–768 px), tema scuro, tastiera, riconnessione |
-
-### I test di accettazione
-
-`sudo make test-integration` esegue la suite completa contro il Docker locale.
-**Modifica il vero `/etc/hosts`** (con backup, vedi sotto): va lanciata su una
-macchina di sviluppo.
-L'estate comprende quindici container che coprono ogni regola:
-
-| Container | Cosa verifica |
-|---|---|
-| `dhi-nginx -p N:80` | Il caso della specifica: porta pubblicata e porta diretta |
-| `dhi-nginx-hostport -p 127.0.0.1:N:80` | Bind esplicito su loopback |
-| `dhi-nginx-multi -p N:80 -p M:80` | Due porte pubblicate sotto un solo nome |
-| `dhi-python -p N:8000` | Porta non standard |
-| `dhi-busy -p N:8080` | Altro server, altra porta |
-| `dhi-compose_web_1` | Nome con underscore: forma grezza e sanitizzata |
-| `dhi-alias-svc` | Alias di rete (`--network-alias`) |
-| `dhi-noports -P` | Porta esposta ma non pubblicata |
-| `dhi-noalias` | Nessuna porta pubblicata |
-| `dhi-weird_name` | Caratteri illegali in un host name |
-| `dhi-created` | Creato ma non avviato |
-| `dhi-stopped` | Avviato e poi fermato |
-| `dhi-hostnet --network host` | **Deve essere escluso** |
-| `dhi-nonet --network none` | **Deve essere escluso** |
-| `localhost` | **Nome riservato: deve essere escluso** |
-
-Altri container, creati dai singoli test, coprono UDP, una porta di database, una
-porta TLS, un container su due reti, un container in pausa e due container che
-vogliono lo stesso alias. In tutto, oltre venti configurazioni.
-
-La suite verifica che i nomi risolvano davvero (`getent ahostsv4`), che le
-porte giuste rispondano `HTTP 200`, che il ciclo di vita segua Docker, che
-l'agente sopravviva a un `kill -9`, e che la web UI rifletta lo stato.
-
-**Nota sulla risoluzione.** Su molte reti il resolver del provider risponde
-`127.0.0.1` a qualunque nome inesistente, per intercettare refusi. In quel caso
-"il nome risolve" non dimostra nulla, perché la risposta arriva dal DNS e non da
-`/etc/hosts`. La suite lo rileva da sola e in quel caso usa il file come
-verifica.
-
-**Sicurezza della suite.** `/etc/hosts` viene messo in backup in
-`/tmp/docker-hoster-injector.hosts.backup` e ripristinato al termine, anche in
- caso di panic. Senza i permessi di scrittura la suite si rifiuta di partire:
-metà delle verifiche non avrebbe significato.
-
-### Il test di crash
-
-Il test più importante avvia un **processo figlio** che riscrive il file in
-continuo e lo termina con `SIGKILL` a un momento scelto dall'OS, poi verifica
-che il file resti utilizzabile e che un riavvio converga. Un `kill -9` vero,
-non simulato: solo un vero kill lascia sul disco lo stato che conta.
-
-```console
-$ go test -tags=integration -v -run TestCrashDuringWrites ./test/integration/
---- PASS: TestCrashDuringWritesLeavesAStableFile (0.00s)
-    --- PASS: TestCrashDuringWritesLeavesAStableFile/file (3.15s)
-    --- PASS: TestCrashDuringWritesLeavesAStableFile/dir (3.16s)
-```
-
-### CI
-
-`.github/workflows/ci.yml` esegue:
-
-- **lint** — gofmt, `go vet`, golangci-lint, test con race detector, build;
-- **integration** — matrix Docker **25, 26, 27, 28, 29** (dind);
-- **e2e** — la web UI in Chrome con Playwright, contro un agente e container veri;
-- **rhel** — smoke test su Fedora, dove `/etc/resolv.conf` è gestito da
-  NetworkManager e non da systemd-resolved;
-- **image** — build e ispezione dell'immagine.
-
----
-
-## Architettura
-
-```
-cmd/docker-hoster-injector/    main: comandi, segnali, watchdog di arresto
-internal/
-  agent/        ciclo di vita: avvio, esecuzione, arresto che rimuove il blocco, clean, healthcheck
-  config/       da ambiente a configurazione validata
-  naming/       nomi Docker → nomi host, sanitizzazione, collisioni
-  hostsfile/    parsing, rendering, scrittura atomica, recovery
-  logging/      logger strutturato
-  version/      confronto numerico delle versioni API
-  dockerclient/ l'unico package che conosce i tipi del Docker Engine
-  watcher/      eventi + resync, con backoff
-  reconcile/    stato desiderato, regole di inclusione, collisioni
-  apply/        scrittura singola con debounce
-  webui/        pagina, API JSON, link di accesso, stream SSE, metriche
-test/integration/              acceptance test: crash, uscite, immagine, web UI
-test/e2e/                      Playwright: la web UI in un browser vero
-```
-
-Le dipendenze sono volutamente minime: solo il client Docker ufficiale e
-le sue dipendenze transitive. Il `flock` usa `syscall`. Niente framework di test.
-
-### Note di implementazione
-
-**Il writer non si fidava dell'input.** I nomi vengono validati in uscita: un
-nome contenente un `\n` potrebbe iniettare un record arbitrario nel file di
-sistema dell'host. Oggi i nomi arrivano da Docker e sono puliti, ma una
-garanzia che dipende da un invariante esterna che vale per sempre non è una
-garanzia. Un nome non sicuro viene **scartato intero**, mai troncato: un nome
-troncato punterebbe silenziosamente a qualcos'altro.
-
-**Il sanitizzatore non può essere iniettivo** e i test lo documentano
-esplicitamente invece di nasconderlo, mostrando la proprietà che conta: ogni
-container mantiene un nome proprio, e i nomi contesi sono assegnati in modo
-deterministico.
-
-**Gli alias di rete richiedono una richiesta per container.** Il Docker Engine
-restituisce `null` per `Aliases` e `DNSNames` in `/containers/json`: esistono
-solo in `/containers/{id}/json`. Leggerli dal primo endpoint significa pubblicare
-niente, e la funzionalità si rompe in silenzio. L'agente elenca i container e poi
-li ispeziona a concorrenza limitata.
-
-**Gli eventi dicono solo che qualcosa è successo, mai cosa.** Ogni trigger
-provoca una rilettura completa dello stato: trattare un evento come un fatto da
-applicare sarebbe un bug che si manifesta solo al rare eventi persi. Il resync
-periodico è la garanzia di correttezza, gli eventi sono solo latenza.
-
----
+- **Il socket Docker equivale a root sull'host.** È montato `:ro`, ma `:ro` non
+  limita le richieste che vi passano: non esporlo oltre il necessario.
+- La pagina di monitoraggio rivela nomi, indirizzi e porte e non ha
+  autenticazione: tienila su `127.0.0.1`.
+- Il container non ha capability (`cap_drop: ALL`, `no-new-privileges`, root
+  filesystem in sola lettura); il binario è statico e gira su `scratch`.
+- Con la modalità `dir` il container vede `/etc` in scrittura. L'agente crea e
+  rimuove solo i propri file `.hosts-docker-hoster-injector-*`.
+- Se l'utente non è nel gruppo `docker`: `--group-add "$(getent group docker | cut -d: -f3)"`.
 
 ## Risoluzione dei problemi
 
-### Il nome non risolve
+**Il nome non risolve.**
 
 ```bash
-getent hosts nginx.docker.local    # come farebbe curl o il browser
+getent hosts nginx.docker.local               # come farebbe curl o il browser
+grep -A20 'BEGIN docker-hoster-injector' /etc/hosts   # il record è nel file?
+docker logs docker-hoster-injector            # l'agente è vivo?
+grep '^hosts:' /etc/nsswitch.conf             # include "files"?
 ```
 
-Se non restituisce nulla:
+Alcuni resolver (provider con ricerca per dominio o risposta jolly) rispondono a
+qualunque nome: se `getent` risolve ma il nome non è nel blocco, la risposta viene
+dal DNS, non da questo agente.
 
-```bash
-# 1. il record è nel file?
-grep -A20 'BEGIN docker-hoster-injector' /etc/hosts
+**Funziona con `ping` ma non con `curl`.** Con `nss-myhostname` o ricerca `ndots`
+il DNS può avere la precedenza. Il record è comunque in `/etc/hosts`: verifica
+con `getent hosts`.
 
-# 2. l'agente è vivo?
-docker logs docker-hoster-injector
+**I record spariscono dopo una modifica di `/etc/hosts` dall'host.** Stai usando il
+mount del singolo file e l'host ha sostituito il file: passa alla modalità `dir`
+oppure `docker restart docker-hoster-injector`.
 
-# 3. nsswitch include "files"?
-grep '^hosts:' /etc/nsswitch.conf
-```
+**Un container non compare.** Deve essere `running`, non avere rete `none`/`host`
+e un nome non riservato. Il motivo è nella tabella «Not published» della pagina e
+nei log (campo `container`).
 
-### Funziona con `ping` ma non con `curl`
+**`/etc/hosts` non scrivibile.** L'agente non si ferma: registra l'errore e riprova
+al prossimo evento o resync (`docker logs docker-hoster-injector | grep -i
+'write\|permission'`).
 
-Su sistemi con `nss-myhostname` o con ricerca `ndots`, un resolver può
-preferire il DNS. Il record è comunque in `/etc/hosts`; verificare con
-`getent hosts`, che usa esattamente `nss-files`.
+**Dopo un crash o un `kill -9`.** `docker restart docker-hoster-injector` ripara il
+blocco; per toglierlo senza riavviare l'agente usa `clean` (vedi sopra).
 
-### `/etc/hosts` non scrivibile
+## Documentazione tecnica
 
-L'agente non muore: registra l'errore e riprova al prossimo evento o resync.
-Con `cap_drop: ALL` il container (root) può scrivere solo un file di cui è
-proprietario: `/etc/hosts` dell'host è di root, quindi va bene, mentre un file
-di un altro utente no. Verificare con:
-
-```bash
-docker logs docker-hoster-injector | grep -i 'write\|permission'
-```
-
-### Un container non compare
-
-Controllare che sia `running` e non abbia rete `none`/`host`, e che il nome non
-sia riservato (`localhost`, `ip6-*`). I dettagli sono nei log con il campo
-`container`.
-
-### Lo stato non converge dopo un crash
-
-```bash
-docker restart docker-hoster-injector
-docker logs -f docker-hoster-injector
-```
-
-Al riavvio il recovery ripara i blocchi non terminati; la riconciliazione
-successiva ricostruisce tutti i record.
-
-Per togliere i record senza far ripartire l'agente (dopo un `kill -9`, o prima di
-disinstallarlo):
-
-```bash
-docker run --rm -v /etc/hosts:/etc/hosts docker-hoster-injector:dev clean
-```
-
----
+| | |
+|---|---|
+| [docs/naming.md](docs/naming.md) | Come si formano i nomi, collisioni, perché `_` diventa `--` |
+| [docs/web-ui.md](docs/web-ui.md) | Rotte, regole dei link, sicurezza della pagina |
+| [docs/crash-safety.md](docs/crash-safety.md) | Modalità di montaggio, garanzie di scrittura, recovery, uscite |
+| [docs/architecture.md](docs/architecture.md) | Struttura del codice e scelte implementative |
+| [docs/development.md](docs/development.md) | Build, test, CI, compatibilità con Docker più vecchi |
 
 ## Licenza
 

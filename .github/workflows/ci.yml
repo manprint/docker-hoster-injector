@@ -43,7 +43,7 @@ jobs:
 
       - name: Lint (staticcheck, errcheck, govet, revive, gosec)
         run: |
-          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
           make lint
 
       - name: Unit tests
@@ -57,19 +57,33 @@ jobs:
       - name: Build
         run: make build
 
-      - name: Verify the binary has no dynamic dependencies
-        run: file bin/docker-hoster-injector && ldd bin/docker-hoster-injector || true
+      # The image is "FROM scratch": a dynamically linked binary would not start.
+      - name: Verify the binary is static
+        run: |
+          file bin/docker-hoster-injector
+          file bin/docker-hoster-injector | grep -q 'statically linked'
+          ! ldd bin/docker-hoster-injector
 
   # The whole point of the project: does the host actually resolve the name?
-  # Runs against real Docker engines, from 25 upwards.
+  # Runs against real Docker engines. The supported floor is API 1.40 (Docker
+  # 19.03); 20.10 and 23 are the oldest engines available as dind images, and
+  # are marked experimental until they have a record of passing: a failure there
+  # is reported but does not fail the workflow.
   integration:
     name: integration (docker ${{ matrix.docker }})
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
         docker: ['25', '26', '27', '28', '29']
+        experimental: [false]
+        include:
+          - docker: '20.10'
+            experimental: true
+          - docker: '23'
+            experimental: true
     services:
       docker:
         image: docker:${{ matrix.docker }}-dind
@@ -110,8 +124,9 @@ jobs:
           docker version
           echo "API version: $(docker version --format '{{.Server.APIVersion}}')"
 
+      # Root is needed to rewrite /etc/hosts; -E keeps DOCKER_HOST.
       - name: Integration tests
-        run: make test-integration
+        run: make test-integration SUDO="sudo -E"
 
       - name: Build the image
         run: docker build -t docker-hoster-injector:ci .
@@ -145,71 +160,16 @@ jobs:
           name: playwright-traces
           path: test/e2e/test-results
 
-  # Proves the resolver integration works on a RHEL-family host, where
-  # systemd-resolved and /etc/resolv.conf management differ from Debian.
-  rhel:
-    name: rhel-family smoke test
+  # What a user actually runs: the shipped docker-compose.yml, a real container,
+  # a real name resolution, and the hosts file given back on "compose down".
+  smoke:
+    name: smoke (docker-compose.yml)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    container:
-      image: fedora:latest
-      options: --privileged
+    timeout-minutes: 15
     steps:
-      - name: Install the toolchain
-        run: |
-          dnf install -y golang git make docker
-          systemctl enable --now docker
-
       - uses: actions/checkout@v4
-
-      - name: Build
-        run: make build
-
-      - name: Unit tests
-        run: make test
-
-      - name: Build the image
-        run: docker build -t injector-local .
-
-      - name: Start a container and the injector
-        run: |
-          set -euo pipefail
-          docker run -d --name smoke-nginx -p 18080:80 nginx:alpine
-          docker run -d --name injector \
-            -v /var/run/docker.sock:/var/run/docker.sock:ro \
-            -v /etc:/host/etc \
-            -e HOSTS_FILE=/host/etc/hosts \
-            -e HOSTS_MOUNT_MODE=dir \
-            -p 18081:8080 \
-            injector-local
-
-      - name: Assert the name resolves end to end
-        run: |
-          set -euo pipefail
-          for i in $(seq 1 30); do
-            if getent hosts smoke-nginx.docker.local; then
-              break
-            fi
-            sleep 1
-          done
-          getent hosts smoke-nginx.docker.local
-          curl -fsS --max-time 5 -o /dev/null \
-            http://smoke-nginx.docker.local:18080/
-          echo "::notice::smoke-nginx.docker.local:18080 resolved and served"
-
-      - name: Assert user entries survived
-        run: |
-          set -euo pipefail
-          grep -q localhost /etc/hosts
-          ! grep -qE '^\s*#?\s*127\.0\.0\.1\s+ip6-' /etc/hosts || true
-          echo "user entries preserved"
-
-      - name: Web UI answers
-        run: curl -fsS --max-time 5 http://localhost:18081/api/entries
-
-      - name: Cleanup
-        if: always()
-        run: docker rm -f injector smoke-nginx || true
+      - name: Smoke test
+        run: make smoke
 
   image:
     name: image

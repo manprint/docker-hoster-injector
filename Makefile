@@ -15,7 +15,13 @@ BUILDFLAGS  := -trimpath -ldflags '$(LDFLAGS)'
 
 # Colours are disabled when not attached to a terminal.
 ifneq ($(shell test -t 1 && echo tty),tty)
-  BOLD := ; SGR0 := ; GRN := ; YLW := ; RED := ; DIM := ; RST :=
+  BOLD :=
+  SGR0 :=
+  GRN :=
+  YLW :=
+  RED :=
+  DIM :=
+  RST :=
 else
   BOLD := $(shell tput bold); SGR0 := $(shell tput sgr0)
   GRN := $(shell tput setaf 2); YLW := $(shell tput setaf 3)
@@ -79,10 +85,20 @@ cover: ## Run unit tests and report coverage
 	@$(GO) test $(GOFLAGS) -covermode=atomic -coverprofile=coverage.out ./...
 	@$(GO) tool cover -func=coverage.out | tail -n 1
 
+# The integration suite manages the real /etc/hosts (it backs it up first and
+# restores it at the end), so it must run as root. The test binary is compiled
+# as the current user and only that binary runs under SUDO, so root never
+# touches the Go build cache:
+#   sudo make test-integration          (as root already)
+#   make test-integration SUDO=sudo     (CI uses "sudo -E" to keep DOCKER_HOST)
+SUDO ?=
+INTEGRATION_BIN := $(BIN_DIR)/integration.test
+
 .PHONY: test-integration
-test-integration: build ## Run the acceptance tests against the local Docker daemon
-	@echo "$(DIM)integration$(RST) requires a Docker daemon and will provision containers"
-	@$(GO) test $(GOFLAGS) -tags=integration -count=1 -timeout=20m -v ./test/integration/...
+test-integration: build ## Run the acceptance tests against the local Docker daemon (needs root: see SUDO)
+	@echo "$(DIM)integration$(RST) rewrites /etc/hosts (backed up and restored) and provisions containers"
+	@$(GO) test $(GOFLAGS) -c -tags=integration -o $(abspath $(INTEGRATION_BIN)) ./test/integration
+	@cd test/integration && $(SUDO) $(abspath $(INTEGRATION_BIN)) -test.count=1 -test.timeout=20m -test.v
 
 .PHONY: test-e2e
 test-e2e: build ## Run the browser tests of the web UI (Playwright, system Chrome, Docker)
@@ -92,13 +108,17 @@ test-e2e: build ## Run the browser tests of the web UI (Playwright, system Chrom
 fuzz: ## Fuzz the hosts file round trip for 30s
 	@$(GO) test ./internal/hostsfile -run '^$$' -fuzz FuzzAddThenClearRoundTrip -fuzztime 30s
 
+.PHONY: smoke
+smoke: ## Start the shipped docker-compose.yml for real and check a name resolves (needs docker; sudo for /etc)
+	@bash scripts/smoke.sh
+
 .PHONY: tidy
 tidy: ## Tidy go.mod / go.sum
 	@$(GO) mod tidy
 
 .PHONY: image
 image: ## Build the container image
-	@docker build -t $(IMAGE):$(TAG) -t $(IMAGE):latest .
+	@docker build --build-arg VERSION=$(VERSION) -t $(IMAGE):$(TAG) -t $(IMAGE):latest .
 	@echo "$(GRN)OK$(RST) $(IMAGE):$(TAG)"
 
 .PHONY: clean

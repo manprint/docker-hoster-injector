@@ -64,7 +64,7 @@ func TestLoadFromDefaults(t *testing.T) {
 func TestLoadFromSpecExample(t *testing.T) {
 	t.Parallel()
 
-	// The exact scenario from Specs.txt, with nothing else configured.
+	// The scenario of the original specification, with nothing else configured.
 	cfg, err := LoadFrom(env(map[string]string{
 		"DNS_SUFFIX": "docker.local",
 	}))

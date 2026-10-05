@@ -1,6 +1,6 @@
 version: "2"
 
-# The set BestPractice.md §9 asks for.
+# The linter set the project's style guide asks for.
 linters:
   default: none
   enable:

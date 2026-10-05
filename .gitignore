@@ -14,3 +14,7 @@ coverage.*
 .vscode/
 *.swp
 .DS_Store
+
+# Working documents kept out of the repository
+/Specs.txt
+/BestPractice.md
