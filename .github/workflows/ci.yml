@@ -1,0 +1,195 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: '1.25'
+
+jobs:
+  # Fast feedback: formatting, vet, unit tests. No Docker needed.
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l . | tee /dev/stderr)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt found unformatted files, run 'make fmt'"
+            exit 1
+          fi
+
+      - name: Vet
+        run: make vet
+
+      - name: Staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
+
+      - name: Unit tests
+        run: make test-race
+
+      - name: Coverage
+        run: |
+          go test -covermode=atomic -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out | tail -n 1
+
+      - name: Build
+        run: make build
+
+      - name: Verify the binary has no dynamic dependencies
+        run: file bin/docker-hoster-injector && ldd bin/docker-hoster-injector || true
+
+  # The whole point of the project: does the host actually resolve the name?
+  # Runs against real Docker engines, from 25 upwards.
+  integration:
+    name: integration (docker ${{ matrix.docker }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        docker: ['25', '26', '27', '28', '29']
+    services:
+      docker:
+        image: docker:${{ matrix.docker }}-dind
+        options: >-
+          --privileged
+          --name docker-dind-${{ matrix.docker }}
+          --network host
+          --dns 8.8.8.8
+          --env DOCKER_TLS_CERTDIR=
+        ports:
+          - 2375:2375
+    env:
+      DOCKER_HOST: tcp://localhost:2375
+      TESTCONTAINERS_RYUK_DISABLED: 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Wait for the Docker daemon
+        run: |
+          for i in $(seq 1 60); do
+            if docker version; then
+              echo "daemon is up"
+              exit 0
+            fi
+            echo "waiting for docker ($i/60)"
+            sleep 2
+          done
+          echo "::error::Docker daemon never became ready"
+          exit 1
+
+      - name: Report the engine version under test
+        run: |
+          docker version
+          echo "API version: $(docker version --format '{{.Server.APIVersion}}')"
+
+      - name: Integration tests
+        run: make test-integration
+
+      - name: Build the image
+        run: docker build -t docker-hoster-injector:ci .
+
+  # Proves the resolver integration works on a RHEL-family host, where
+  # systemd-resolved and /etc/resolv.conf management differ from Debian.
+  rhel:
+    name: rhel-family smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: fedora:latest
+      options: --privileged
+    steps:
+      - name: Install the toolchain
+        run: |
+          dnf install -y golang git make docker
+          systemctl enable --now docker
+
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: make build
+
+      - name: Unit tests
+        run: make test
+
+      - name: Build the image
+        run: docker build -t injector-local .
+
+      - name: Start a container and the injector
+        run: |
+          set -euo pipefail
+          docker run -d --name smoke-nginx -p 18080:80 nginx:alpine
+          docker run -d --name injector \
+            -v /var/run/docker.sock:/var/run/docker.sock:ro \
+            -v /etc:/host/etc \
+            -e HOSTS_FILE=/host/etc/hosts \
+            -e HOSTS_MOUNT_MODE=dir \
+            -p 18081:8080 \
+            injector-local
+
+      - name: Assert the name resolves end to end
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if getent hosts smoke-nginx.docker.local; then
+              break
+            fi
+            sleep 1
+          done
+          getent hosts smoke-nginx.docker.local
+          curl -fsS --max-time 5 -o /dev/null \
+            http://smoke-nginx.docker.local:18080/
+          echo "::notice::smoke-nginx.docker.local:18080 resolved and served"
+
+      - name: Assert user entries survived
+        run: |
+          set -euo pipefail
+          grep -q localhost /etc/hosts
+          ! grep -qE '^\s*#?\s*127\.0\.0\.1\s+ip6-' /etc/hosts || true
+          echo "user entries preserved"
+
+      - name: Web UI answers
+        run: curl -fsS --max-time 5 http://localhost:18081/api/entries
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f injector smoke-nginx || true
+
+  image:
+    name: image
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and inspect
+        run: |
+          docker build -t docker-hoster-injector:ci .
+          docker image inspect docker-hoster-injector:ci \
+            --format 'size={{.Size}} bytes, entrypoint={{.Config.Entrypoint}}'

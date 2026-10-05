@@ -1,0 +1,57 @@
+# Copy this file to docker-compose.yml and adjust as needed.
+#
+# The agent needs exactly two things from the host: the Docker socket, to
+# observe the container lifecycle, and the hosts file, to write into it.
+services:
+  docker-hoster-injector:
+    image: docker-hoster-injector:dev
+    build: .
+    container_name: docker-hoster-injector
+    restart: unless-stopped
+
+    environment:
+      # The base domain. A container named "nginx" becomes nginx.docker.local.
+      DNS_SUFFIX: docker.local
+
+      # Optional tuning, shown with their defaults.
+      # TARGET_MODE: both          # both | published | container-ip
+      # RESYNC_INTERVAL: 30s       # full reconciliation period
+      # EVENT_DEBOUNCE: 250ms      # coalesce bursts of docker events
+      # LOG_LEVEL: info
+      # LOG_FORMAT: json
+      # WEB_ADDR: ":8080"
+
+    volumes:
+      # Read-only is enough: the agent only needs to watch the lifecycle.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+      # Option A, least privilege: mount the single file. Writes are then
+      # in-place but still a single write(2), so the window of incoherence is
+      # measured in microseconds.
+      - /etc/hosts:/etc/hosts
+
+      # Option B, fully atomic: drop this line above and mount the directory
+      # instead, then set HOSTS_FILE and HOSTS_MOUNT_MODE accordingly.
+      #   - /etc:/host/etc
+      #   HOSTS_FILE: /host/etc/hosts
+      #   HOSTS_MOUNT_MODE: dir
+
+    ports:
+      # The read-only monitoring table. Bound to loopback because the API has
+      # no authentication: it reveals container names, addresses and ports.
+      - "127.0.0.1:8080:8080"
+
+    # The agent only writes the hosts file, so it needs no extra privileges.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>docker-hoster-injector</title>
+<style>{{.CSS}}</style>
+</head>
+<body>
+<header>
+  <h1>docker-hoster-injector</h1>
+  <p class="sub">
+    <code>{{.Config.DNSSuffix}}</code> &middot;
+    <code>{{.Config.HostsFile}}</code> &middot;
+    target <code>{{.Config.TargetMode}}</code> &middot;
+    mount <code>{{.Config.MountMode}}</code> &middot;
+    v{{.Config.Version}}
+  </p>
+  <p class="stat">
+    <span class="pill"><b>{{.Snapshot.Summary.Containers}}</b> containers</span>
+    <span class="pill"><b>{{.Snapshot.Summary.Records}}</b> records</span>
+    <span class="pill"><b>{{.Snapshot.Summary.Names}}</b> names</span>
+    <span class="pill"><b>{{.Snapshot.Summary.Skipped}}</b> skipped</span>
+    <span id="state" class="pill waiting">connecting…</span>
+  </p>
+  <p class="filters">
+    <input id="filter" type="search" placeholder="filter by container, name or address"
+           autocomplete="off" spellcheck="false">
+  </p>
+</header>
+
+<main>
+  <table id="published">
+    <caption>Published records</caption>
+    <thead>
+      <tr><th>Container</th><th>State</th><th>Address</th><th>Names</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <table id="skipped">
+    <caption>Not published</caption>
+    <thead>
+      <tr><th>Container</th><th>State</th><th>Reason</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <p id="empty" class="empty" hidden>No container is published.</p>
+</main>
+
+<footer>
+  <span id="updated">never updated</span>
+  <span>read-only service, no authentication: keep it on a trusted network</span>
+</footer>
+
+<script>
+const SNAPSHOT = {{.SnapshotJSON}};
+
+// The table is rebuilt from a complete snapshot on every event, which is what
+// lets the page survive a disconnect without any client-side state machine.
+function render(snap) {
+  const filter = document.getElementById('filter').value.trim().toLowerCase();
+  const match = (s) => !filter || s.toLowerCase().includes(filter);
+
+  const published = snap.records.filter(r => match(r.container + ' ' + r.address + ' ' + r.names.join(' ')));
+  const skipped = snap.skipped.filter(r => match(r.container + ' ' + r.reason));
+
+  const pbody = document.querySelector('#published tbody');
+  pbody.replaceChildren(...published.map(r => {
+    const tr = document.createElement('tr');
+    tr.dataset.key = r.container_id + '|' + r.address;
+    cell(tr, r.container);
+    cell(tr, r.state, 'state-' + r.state);
+    cell(tr, r.address, 'addr');
+    const td = document.createElement('td');
+    for (const n of r.names) {
+      const code = document.createElement('code');
+      code.className = 'name';
+      code.textContent = n;
+      td.appendChild(code);
+    }
+    tr.appendChild(td);
+    return tr;
+  }));
+
+  const sbody = document.querySelector('#skipped tbody');
+  sbody.replaceChildren(...skipped.map(r => {
+    const tr = document.createElement('tr');
+    cell(tr, r.container);
+    cell(tr, r.state, 'state-' + r.state);
+    cell(tr, r.reason, 'reason');
+    return tr;
+  }));
+
+  document.getElementById('empty').hidden = published.length > 0;
+  document.querySelector('#published caption').textContent =
+    'Published records (' + published.length + ')';
+  document.querySelector('#skipped caption').textContent =
+    'Not published (' + skipped.length + ')';
+
+  header(snap);
+  highlightChanged();
+}
+
+function cell(tr, text, cls) {
+  const td = document.createElement('td');
+  if (cls) td.className = cls;
+  td.textContent = text === undefined || text === null ? '' : String(text);
+  tr.appendChild(td);
+  return td;
+}
+
+function header(snap) {
+  document.querySelectorAll('.stat .pill')[0].innerHTML = '<b>' + snap.summary.containers + '</b> containers';
+  document.querySelectorAll('.stat .pill')[1].innerHTML = '<b>' + snap.summary.records + '</b> records';
+  document.querySelectorAll('.stat .pill')[2].innerHTML = '<b>' + snap.summary.names + '</b> names';
+  document.querySelectorAll('.stat .pill')[3].innerHTML = '<b>' + snap.summary.skipped + '</b> skipped';
+  document.getElementById('updated').textContent =
+    'updated ' + new Date(snap.generated_at).toLocaleTimeString();
+}
+
+// Flash the rows whose content changed, so an operator watching the page sees
+// what moved rather than having to diff it.
+let previous = new Map();
+function highlightChanged() {
+  const now = new Map();
+  for (const tr of document.querySelectorAll('#published tbody tr')) {
+    const key = tr.dataset.key;
+    const value = tr.textContent;
+    now.set(key, value);
+    if (previous.has(key) && previous.get(key) !== value) {
+      tr.classList.remove('changed');
+      void tr.offsetWidth; // restart the animation
+      tr.classList.add('changed');
+    }
+  }
+  previous = now;
+}
+
+function setState(kind, text) {
+  const el = document.getElementById('state');
+  el.className = 'pill ' + kind;
+  el.textContent = text;
+}
+
+function connect() {
+  const source = new EventSource('/api/events');
+
+  source.addEventListener('snapshot', (ev) => {
+    setState('live', 'live');
+    render(JSON.parse(ev.data));
+  });
+
+  source.onopen = () => setState('live', 'live');
+  source.onerror = () => {
+    // EventSource reconnects on its own; only report it.
+    setState('waiting', 'reconnecting…');
+  };
+}
+
+document.getElementById('filter').addEventListener('input', () => render(current));
+let current = SNAPSHOT;
+render(current);
+connect();
+</script>
+</body>
+</html>

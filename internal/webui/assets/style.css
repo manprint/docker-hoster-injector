@@ -1,0 +1,152 @@
+/* docker-hoster-injector monitoring page.
+   Self-contained by design: no CDN, no webfont, no external request. The
+   service is often exposed on an isolated network where none of those would
+   load anyway. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #1c1e21;
+  --muted: #6b7280;
+  --line: #e3e6ea;
+  --head: #f6f7f9;
+  --accent: #1f6feb;
+  --ok: #15803d;
+  --warn: #b45309;
+  --bad: #b91c1c;
+  --flash: #fff3c4;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1115;
+    --fg: #e6e8eb;
+    --muted: #9aa3af;
+    --line: #262b33;
+    --head: #171a20;
+    --accent: #6ea8fe;
+    --ok: #4ade80;
+    --warn: #fbbf24;
+    --bad: #f87171;
+    --flash: #423c1a;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 1.5rem 1.25rem 3rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+        "Helvetica Neue", Arial, sans-serif;
+}
+
+header, main, footer { max-width: 76rem; margin: 0 auto; }
+
+h1 {
+  margin: 0 0 .25rem;
+  font-size: 1.25rem;
+  letter-spacing: -.01em;
+}
+
+.sub { margin: 0 0 .75rem; color: var(--muted); }
+
+code, .addr, .name {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+               "Liberation Mono", monospace;
+  font-size: .9em;
+}
+
+.stat { margin: 0 0 .75rem; display: flex; flex-wrap: wrap; gap: .4rem; }
+
+.pill {
+  display: inline-block;
+  padding: .15rem .55rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--head);
+  color: var(--muted);
+  font-size: .85rem;
+}
+.pill b { color: var(--fg); }
+.pill.live     { border-color: var(--ok); color: var(--ok); }
+.pill.waiting  { border-color: var(--warn); color: var(--warn); }
+.pill.down     { border-color: var(--bad); color: var(--bad); }
+
+.filters { margin: 0 0 1.25rem; }
+.filters input {
+  width: min(28rem, 100%);
+  padding: .45rem .6rem;
+  border: 1px solid var(--line);
+  border-radius: .4rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+.filters input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+table {
+  width: 100%;
+  margin: 0 0 1.75rem;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+caption {
+  padding-bottom: .4rem;
+  color: var(--muted);
+  text-align: left;
+  font-size: .85rem;
+}
+
+th, td {
+  padding: .4rem .6rem;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+th { color: var(--muted); font-weight: 600; font-size: .8rem; text-transform: uppercase;
+     letter-spacing: .04em; }
+
+tbody tr:hover { background: var(--head); }
+
+.name {
+  display: inline-block;
+  margin: 0 .3rem .2rem 0;
+  padding: .05rem .35rem;
+  border: 1px solid var(--line);
+  border-radius: .3rem;
+  background: var(--head);
+}
+
+.state-running { color: var(--ok); }
+.state-exited, .state-dead, .state-removing { color: var(--bad); }
+.state-paused, .state-created, .state-restarting { color: var(--warn); }
+.reason { color: var(--muted); font-style: italic; }
+
+.empty { color: var(--muted); font-style: italic; }
+
+/* Flash a row whose content changed, so a watched page shows what moved. */
+@keyframes flash {
+  from { background: var(--flash); }
+  to   { background: transparent; }
+}
+tr.changed td { animation: flash 1.8s ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+  tr.changed td { animation: none; }
+}
+
+footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .75rem;
+  justify-content: space-between;
+  padding-top: .75rem;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: .8rem;
+}
