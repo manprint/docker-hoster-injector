@@ -11,8 +11,8 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/mint/docker-hoster-injector/internal/config"
-	"github.com/mint/docker-hoster-injector/internal/hostsfile"
+	"github.com/manprint/docker-hoster-injector/internal/config"
+	"github.com/manprint/docker-hoster-injector/internal/hostsfile"
 )
 
 func net4(i int) net.IP { return net.IPv4(172, 17, 0, byte(i)) }

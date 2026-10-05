@@ -4,7 +4,9 @@
 # Built with the Go release the project is developed on (the toolchain line of
 # go.mod). The toolchain layer is the only thing that needs a full Go
 # distribution; everything else is static.
-FROM golang:1.27-alpine AS build
+# BUILDPLATFORM: the compiler always runs natively and cross-compiles, so a
+# multi-architecture build does not run Go under emulation.
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
 
 # git is only required when the build resolves VCS information for the
 # version stamp, and it is removed from the final image anyway.

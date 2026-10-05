@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mint/docker-hoster-injector/internal/config"
-	"github.com/mint/docker-hoster-injector/internal/dockerclient"
-	"github.com/mint/docker-hoster-injector/internal/hostsfile"
+	"github.com/manprint/docker-hoster-injector/internal/config"
+	"github.com/manprint/docker-hoster-injector/internal/dockerclient"
+	"github.com/manprint/docker-hoster-injector/internal/hostsfile"
 )
 
 const operatorHosts = "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost\n\n# mine\n10.9.9.9 intranet\n"

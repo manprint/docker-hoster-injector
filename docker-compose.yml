@@ -1,11 +1,11 @@
-# Copy this file to docker-compose.yml and adjust as needed.
+# Uses the published image. To build it from this checkout instead:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 #
 # The agent needs exactly two things from the host: the Docker socket, to
 # observe the container lifecycle, and the hosts file, to write into it.
 services:
   docker-hoster-injector:
-    image: docker-hoster-injector:dev
-    build: .
+    image: ghcr.io/manprint/docker-hoster-injector:latest
     container_name: docker-hoster-injector
     restart: unless-stopped
 

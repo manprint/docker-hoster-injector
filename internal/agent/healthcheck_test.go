@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/mint/docker-hoster-injector/internal/config"
+	"github.com/manprint/docker-hoster-injector/internal/config"
 )
 
 func TestProbeAddr(t *testing.T) {

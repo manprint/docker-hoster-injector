@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mint/docker-hoster-injector/internal/config"
+	"github.com/manprint/docker-hoster-injector/internal/config"
 )
 
 // TestDefaultsMatchReadme guards the README table against drift. Documentation

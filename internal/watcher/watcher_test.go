@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mint/docker-hoster-injector/internal/dockerclient"
+	"github.com/manprint/docker-hoster-injector/internal/dockerclient"
 )
 
 // fakeAPI is a controllable stand-in for the Docker daemon.

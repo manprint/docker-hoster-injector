@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mint/docker-hoster-injector/internal/config"
+	"github.com/manprint/docker-hoster-injector/internal/config"
 )
 
 // DefaultPerm is the mode of a hosts file created by this agent. 0644 keeps it

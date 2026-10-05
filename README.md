@@ -15,9 +15,13 @@ o senza `systemd`): non dipende dal resolver, usa `/etc/hosts`.
 ## Avvio rapido
 
 ```bash
-git clone <questo repository> && cd docker-hoster-injector
-docker compose up -d --build
+git clone https://github.com/manprint/docker-hoster-injector.git
+cd docker-hoster-injector
+docker compose up -d
 ```
+
+L'immagine è pubblicata su GitHub Container Registry
+(`ghcr.io/manprint/docker-hoster-injector`, `linux/amd64` e `linux/arm64`).
 
 Poi, per provare:
 
@@ -42,21 +46,23 @@ il file: `docker compose down`.
 
 Il `docker-compose.yml` incluso monta il socket Docker e la directory `/etc`
 (modalità `dir`), toglie ogni capability, imposta il filesystem in sola lettura
-e lega la pagina di monitoraggio a loopback. Basta `docker compose up -d --build`.
+e lega la pagina di monitoraggio a loopback. Basta `docker compose up -d`. Per
+costruire l'immagine da questa copia del codice invece di scaricarla:
+`docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build`.
 
 ### Docker CLI
 
 ```bash
-docker build -t docker-hoster-injector:dev .
-
 docker run -d --name docker-hoster-injector \
   --restart unless-stopped \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   -v /etc:/host/etc \
   -e HOSTS_FILE=/host/etc/hosts -e HOSTS_MOUNT_MODE=dir \
   -p 127.0.0.1:8080:8080 \
-  docker-hoster-injector:dev
+  ghcr.io/manprint/docker-hoster-injector:latest
 ```
+
+In alternativa `docker build -t docker-hoster-injector:dev .` e si usa quell'immagine.
 
 ### Montare la directory, non il file
 
@@ -150,7 +156,7 @@ docker-hoster-injector version
 
 ```bash
 docker run --rm -v /etc:/host/etc -e HOSTS_FILE=/host/etc/hosts -e HOSTS_MOUNT_MODE=dir \
-  docker-hoster-injector:dev clean
+  ghcr.io/manprint/docker-hoster-injector:latest clean
 ```
 
 L'immagine ha un `HEALTHCHECK` (il binario è la propria sonda, non ci sono shell né

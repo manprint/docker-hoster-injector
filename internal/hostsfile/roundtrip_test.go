@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mint/docker-hoster-injector/internal/config"
+	"github.com/manprint/docker-hoster-injector/internal/config"
 )
 
 // operatorFiles are the shapes a real hosts file comes in. After the block has

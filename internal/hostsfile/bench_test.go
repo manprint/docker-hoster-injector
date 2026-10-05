@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mint/docker-hoster-injector/internal/config"
+	"github.com/manprint/docker-hoster-injector/internal/config"
 )
 
 // buildSampleFile returns a hosts file resembling a real one: operator

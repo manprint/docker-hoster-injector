@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mint/docker-hoster-injector/internal/config"
-	"github.com/mint/docker-hoster-injector/internal/dockerclient"
-	"github.com/mint/docker-hoster-injector/internal/reconcile"
+	"github.com/manprint/docker-hoster-injector/internal/config"
+	"github.com/manprint/docker-hoster-injector/internal/dockerclient"
+	"github.com/manprint/docker-hoster-injector/internal/reconcile"
 )
 
 // notHTTP lists well-known TCP ports whose service does not speak HTTP. Opening

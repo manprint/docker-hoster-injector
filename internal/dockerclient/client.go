@@ -20,7 +20,7 @@ import (
 	"github.com/moby/moby/api/types/events"
 	"github.com/moby/moby/client"
 
-	"github.com/mint/docker-hoster-injector/internal/version"
+	"github.com/manprint/docker-hoster-injector/internal/version"
 )
 
 // ErrUnsupportedAPI reports an engine older than the oldest release this agent

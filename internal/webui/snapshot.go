@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/mint/docker-hoster-injector/internal/reconcile"
+	"github.com/manprint/docker-hoster-injector/internal/reconcile"
 )
 
 // buildSnapshot converts a reconcile result into the API read model.

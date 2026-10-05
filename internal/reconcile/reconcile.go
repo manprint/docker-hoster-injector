@@ -14,10 +14,10 @@ import (
 
 	"strings"
 
-	"github.com/mint/docker-hoster-injector/internal/config"
-	"github.com/mint/docker-hoster-injector/internal/dockerclient"
-	"github.com/mint/docker-hoster-injector/internal/hostsfile"
-	"github.com/mint/docker-hoster-injector/internal/naming"
+	"github.com/manprint/docker-hoster-injector/internal/config"
+	"github.com/manprint/docker-hoster-injector/internal/dockerclient"
+	"github.com/manprint/docker-hoster-injector/internal/hostsfile"
+	"github.com/manprint/docker-hoster-injector/internal/naming"
 )
 
 // Entry is a record destined for the hosts file, plus the provenance the web

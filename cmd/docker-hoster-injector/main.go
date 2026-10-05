@@ -17,9 +17,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mint/docker-hoster-injector/internal/agent"
-	"github.com/mint/docker-hoster-injector/internal/config"
-	"github.com/mint/docker-hoster-injector/internal/logging"
+	"github.com/manprint/docker-hoster-injector/internal/agent"
+	"github.com/manprint/docker-hoster-injector/internal/config"
+	"github.com/manprint/docker-hoster-injector/internal/logging"
 )
 
 // shutdownTimeout is how long a stop may take before the process gives up and

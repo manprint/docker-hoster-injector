@@ -12,7 +12,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/mint/docker-hoster-injector/internal/config"
+	"github.com/manprint/docker-hoster-injector/internal/config"
 )
 
 // Options tweak the logger beyond what the config carries.

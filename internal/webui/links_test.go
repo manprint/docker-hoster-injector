@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mint/docker-hoster-injector/internal/dockerclient"
-	"github.com/mint/docker-hoster-injector/internal/hostsfile"
-	"github.com/mint/docker-hoster-injector/internal/reconcile"
+	"github.com/manprint/docker-hoster-injector/internal/dockerclient"
+	"github.com/manprint/docker-hoster-injector/internal/hostsfile"
+	"github.com/manprint/docker-hoster-injector/internal/reconcile"
 )
 
 func entry(addr string, side reconcile.AddressSide, name string, ports ...dockerclient.Port) reconcile.Entry {

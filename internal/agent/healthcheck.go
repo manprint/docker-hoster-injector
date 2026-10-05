@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mint/docker-hoster-injector/internal/config"
+	"github.com/manprint/docker-hoster-injector/internal/config"
 )
 
 // healthTimeout bounds the whole probe. Docker's own healthcheck timeout is

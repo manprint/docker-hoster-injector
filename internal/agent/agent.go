@@ -22,13 +22,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mint/docker-hoster-injector/internal/apply"
-	"github.com/mint/docker-hoster-injector/internal/config"
-	"github.com/mint/docker-hoster-injector/internal/dockerclient"
-	"github.com/mint/docker-hoster-injector/internal/hostsfile"
-	"github.com/mint/docker-hoster-injector/internal/reconcile"
-	"github.com/mint/docker-hoster-injector/internal/watcher"
-	"github.com/mint/docker-hoster-injector/internal/webui"
+	"github.com/manprint/docker-hoster-injector/internal/apply"
+	"github.com/manprint/docker-hoster-injector/internal/config"
+	"github.com/manprint/docker-hoster-injector/internal/dockerclient"
+	"github.com/manprint/docker-hoster-injector/internal/hostsfile"
+	"github.com/manprint/docker-hoster-injector/internal/reconcile"
+	"github.com/manprint/docker-hoster-injector/internal/watcher"
+	"github.com/manprint/docker-hoster-injector/internal/webui"
 )
 
 // Options are the parts of an Agent that are not configuration.

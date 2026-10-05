@@ -1,4 +1,4 @@
-module github.com/mint/docker-hoster-injector
+module github.com/manprint/docker-hoster-injector
 
 go 1.25.0
 

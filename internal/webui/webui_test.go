@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mint/docker-hoster-injector/internal/hostsfile"
-	"github.com/mint/docker-hoster-injector/internal/naming"
-	"github.com/mint/docker-hoster-injector/internal/reconcile"
+	"github.com/manprint/docker-hoster-injector/internal/hostsfile"
+	"github.com/manprint/docker-hoster-injector/internal/naming"
+	"github.com/manprint/docker-hoster-injector/internal/reconcile"
 )
 
 func testConfig() Config {

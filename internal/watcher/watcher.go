@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mint/docker-hoster-injector/internal/dockerclient"
+	"github.com/manprint/docker-hoster-injector/internal/dockerclient"
 )
 
 // backoff bounds the reconnect delay after a failed stream.

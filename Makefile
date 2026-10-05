@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 
 BINARY      := docker-hoster-injector
-PKG         := github.com/mint/docker-hoster-injector
+PKG         := github.com/manprint/docker-hoster-injector
 CMD         := ./cmd/$(BINARY)
 BIN_DIR     := bin
 DIST_DIR    := dist

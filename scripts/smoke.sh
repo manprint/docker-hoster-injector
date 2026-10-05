@@ -13,6 +13,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# The image under test is built from this checkout, not pulled.
+COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.build.yml)
 PROBE=smoke-web
 PORT=${SMOKE_PORT:-18080}
 SUDO=""
@@ -22,7 +24,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 cleanup() {
   docker rm -f "$PROBE" "$PROBE-2" >/dev/null 2>&1 || true
-  docker compose down >/dev/null 2>&1 || true
+  "${COMPOSE[@]}" down >/dev/null 2>&1 || true
   rm -f "$BEFORE"
 }
 trap cleanup EXIT
@@ -30,7 +32,7 @@ trap cleanup EXIT
 cp /etc/hosts "$BEFORE"
 
 echo "== start the agent from docker-compose.yml"
-docker compose up -d --build
+"${COMPOSE[@]}" up -d --build
 for _ in $(seq 1 30); do
   [ "$(docker inspect -f '{{.State.Health.Status}}' docker-hoster-injector)" = healthy ] && break
   sleep 1
@@ -59,7 +61,7 @@ block | grep -q " $PROBE-2.docker.local" || fail "the agent stopped writing afte
 
 echo "== compose down gives the file back"
 docker rm -f "$PROBE" "$PROBE-2" >/dev/null
-docker compose down
+"${COMPOSE[@]}" down
 diff /etc/hosts "$BEFORE" || fail "/etc/hosts is not as it was"
 if ls /etc/.hosts-docker-hoster-injector-* >/dev/null 2>&1; then fail "temporary file left in /etc"; fi
 

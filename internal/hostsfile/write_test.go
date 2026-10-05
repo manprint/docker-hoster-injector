@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/mint/docker-hoster-injector/internal/config"
+	"github.com/manprint/docker-hoster-injector/internal/config"
 )
 
 // modes are the two write strategies the agent can be configured with. Both

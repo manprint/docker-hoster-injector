@@ -21,9 +21,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mint/docker-hoster-injector/internal/config"
-	"github.com/mint/docker-hoster-injector/internal/hostsfile"
-	"github.com/mint/docker-hoster-injector/internal/naming"
+	"github.com/manprint/docker-hoster-injector/internal/config"
+	"github.com/manprint/docker-hoster-injector/internal/hostsfile"
+	"github.com/manprint/docker-hoster-injector/internal/naming"
 )
 
 // Timing constants. They are deliberately generous: a loaded CI runner can be

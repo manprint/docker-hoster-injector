@@ -22,7 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/mint/docker-hoster-injector/internal/reconcile"
+	"github.com/manprint/docker-hoster-injector/internal/reconcile"
 )
 
 // Snapshot is the read model the page renders.
