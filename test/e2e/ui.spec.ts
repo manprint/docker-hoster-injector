@@ -164,11 +164,21 @@ test('clicking a link opens the container', async ({ page, context }) => {
   const link = page.locator(`td.links a.link[href^="http://pw-web.docker.local:${state.ports.web}"]`).first();
   await expect(link).toBeVisible();
 
+  // The suite gives the agent a private hosts file, so this machine's resolver
+  // does not know the name (and some resolvers answer for any name, which
+  // would make the result depend on the network). The click must go where the
+  // link says, so the name is answered here and the request is observed.
+  const target = `http://pw-web.docker.local:${state.ports.web}/`;
+  const requested: string[] = [];
+  await context.route(`${target}**`, async (route) => {
+    requested.push(route.request().url());
+    await route.fulfill({ status: 200, contentType: 'text/plain', body: 'ok' });
+  });
+
   const [popup] = await Promise.all([context.waitForEvent('page'), link.click()]);
-  // The test machine resolves the name through the hosts file of the agent
-  // only if it is /etc/hosts, which this suite does not touch. The click must
-  // still go where the link says.
-  expect(popup.url()).toBe(`http://pw-web.docker.local:${state.ports.web}/`);
+  await popup.waitForLoadState();
+  expect(popup.url()).toBe(target);
+  expect(requested).toEqual([target]);
   await popup.close();
 
   // The container address is always reachable, whatever the resolver says.
